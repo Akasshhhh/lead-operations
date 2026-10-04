@@ -5,9 +5,11 @@ from voice_platform_contracts.lead import (
     LeadCreate,
     LeadListResponse,
     LeadResponse,
+    LeadScoreResponse,
     LeadUpdate,
     QualificationAnswerResponse,
     QualificationResponse,
+    QualificationUpdate,
 )
 
 __all__ = [
@@ -15,7 +17,9 @@ __all__ = [
     "LeadCreate",
     "LeadListResponse",
     "LeadResponse",
+    "LeadScoreResponse",
     "LeadUpdate",
     "QualificationAnswerResponse",
     "QualificationResponse",
+    "QualificationUpdate",
 ]

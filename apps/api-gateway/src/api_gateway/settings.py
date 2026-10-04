@@ -19,11 +19,13 @@ class GatewaySettings:
     lead_service_url: str
     service_auth_token: str | None = field(repr=False)
     request_timeout_seconds: float
+    conversation_service_url: str = "http://conversation-service:8002"
 
     def __post_init__(self) -> None:
         try:
             token = validate_service_auth(self.environment, self.service_auth_token)
             url = urlsplit(self.lead_service_url)
+            conversation_url = urlsplit(self.conversation_service_url)
             if (
                 url.scheme not in {"http", "https"}
                 or not url.hostname
@@ -35,6 +37,18 @@ class GatewaySettings:
                 or (url.port is not None and not 1 <= url.port <= 65535)
             ):
                 raise ValueError("LEAD_SERVICE_URL must be an HTTP(S) origin without credentials")
+            if (
+                conversation_url.scheme not in {"http", "https"}
+                or not conversation_url.hostname
+                or conversation_url.username is not None
+                or conversation_url.password is not None
+                or conversation_url.query
+                or conversation_url.fragment
+                or conversation_url.path not in {"", "/"}
+            ):
+                raise ValueError(
+                    "CONVERSATION_SERVICE_URL must be an HTTP(S) origin without credentials"
+                )
             if not 0.1 <= self.request_timeout_seconds <= 30:
                 raise ValueError("LEAD_SERVICE_TIMEOUT_SECONDS must be between 0.1 and 30")
         except ValueError as exc:
@@ -45,6 +59,9 @@ class GatewaySettings:
     def from_env(cls) -> GatewaySettings:
         environment = os.getenv("APP_ENV", "local").strip().lower()
         lead_service_url = os.getenv("LEAD_SERVICE_URL", "http://lead-service:8001").strip()
+        conversation_service_url = os.getenv(
+            "CONVERSATION_SERVICE_URL", "http://conversation-service:8002"
+        ).strip()
         token = os.getenv("LEAD_SERVICE_AUTH_TOKEN", "").strip() or None
         raw_timeout = os.getenv("LEAD_SERVICE_TIMEOUT_SECONDS", "5").strip()
         try:
@@ -58,4 +75,5 @@ class GatewaySettings:
             lead_service_url=lead_service_url.rstrip("/"),
             service_auth_token=token,
             request_timeout_seconds=timeout,
+            conversation_service_url=conversation_service_url.rstrip("/"),
         )

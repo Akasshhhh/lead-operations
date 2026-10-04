@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from typing import Annotated, Self
+from typing import Annotated, Literal, Self
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 AnswerKey = Annotated[str, Field(min_length=1, max_length=80, pattern=r"^[a-z][a-z0-9_]*$")]
+QualificationFactStatus = Literal["PROVISIONAL", "CONFIRMED", "CONTRADICTORY"]
 
 
 class LeadMutation(BaseModel):
@@ -99,12 +100,21 @@ class QualificationAnswerResponse(BaseModel):
     id: UUID
     field_key: str
     value: object
+    conflict_value: object | None = None
     normalized_value: str | None
     confidence: float | None
     answer_status: str
     source: str
     conversation_id: UUID | None
     updated_at: datetime
+
+
+class LeadScoreResponse(BaseModel):
+    score: int = Field(ge=0, le=100)
+    classification: str
+    rule_version: str
+    reasons: list[JsonValue]
+    calculated_at: datetime
 
 
 class QualificationResponse(BaseModel):
@@ -114,6 +124,33 @@ class QualificationResponse(BaseModel):
     completeness: int
     version: int
     answers: list[QualificationAnswerResponse]
+    score: LeadScoreResponse | None = None
+
+
+class QualificationFact(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, allow_inf_nan=False)
+
+    field_key: AnswerKey
+    value: JsonValue
+    status: QualificationFactStatus = "PROVISIONAL"
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    resolve_conflict: bool = False
+
+
+class QualificationUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, allow_inf_nan=False)
+
+    conversation_id: UUID
+    turn_id: UUID
+    expected_profile_version: int = Field(ge=1, strict=True)
+    facts: list[QualificationFact] = Field(min_length=1, max_length=20)
+
+    @model_validator(mode="after")
+    def validate_unique_facts(self) -> Self:
+        keys = [fact.field_key for fact in self.facts]
+        if len(keys) != len(set(keys)):
+            raise ValueError("each qualification field may occur only once per update")
+        return self
 
 
 class HealthResponse(BaseModel):

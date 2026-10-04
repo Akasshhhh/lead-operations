@@ -72,6 +72,28 @@ services:
     networks:
       - voice_ai
 
+  conversation-service:
+    build:
+      context: .
+      dockerfile: services/conversation-service/Dockerfile
+    environment:
+      APP_ENV: ${APP_ENV:-local}
+      LEAD_SERVICE_URL: http://lead-service:8001
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:-voice_ai}
+      POSTGRES_USER: ${POSTGRES_USER:-voice_ai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-voice_ai_dev_password}
+      LEAD_SERVICE_AUTH_TOKEN: ${LEAD_SERVICE_AUTH_TOKEN:-local-lead-service-token}
+      CONVERSATION_SERVICE_TIMEOUT_SECONDS: ${CONVERSATION_SERVICE_TIMEOUT_SECONDS:-5}
+    expose:
+      - "8002"
+    depends_on:
+      lead-service:
+        condition: service_started
+    networks:
+      - voice_ai
+
   event-relay:
     build:
       context: .
@@ -102,12 +124,15 @@ services:
     environment:
       APP_ENV: ${APP_ENV:-local}
       LEAD_SERVICE_URL: http://lead-service:8001
+      CONVERSATION_SERVICE_URL: http://conversation-service:8002
       LEAD_SERVICE_AUTH_TOKEN: ${LEAD_SERVICE_AUTH_TOKEN:-local-lead-service-token}
       LEAD_SERVICE_TIMEOUT_SECONDS: ${LEAD_SERVICE_TIMEOUT_SECONDS:-5}
     ports:
       - "${API_GATEWAY_PORT:-8000}:8000"
     depends_on:
       lead-service:
+        condition: service_started
+      conversation-service:
         condition: service_started
     networks:
       - voice_ai

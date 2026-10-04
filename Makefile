@@ -23,7 +23,7 @@ lint:
 	$(VENV_PYTHON) -m ruff check .
 
 typecheck:
-	$(VENV_PYTHON) -m mypy packages services/lead-service/src apps/api-gateway/src workers tests infrastructure/postgres/alembic
+	$(VENV_PYTHON) -m mypy packages services/lead-service/src services/conversation-service/src apps/api-gateway/src workers tests infrastructure/postgres/alembic
 
 test:
 	$(VENV_PYTHON) -m pytest

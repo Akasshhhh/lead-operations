@@ -50,6 +50,7 @@ class LeadServiceClient:
         request_id: str,
         params: Mapping[str, str | int | float | bool | None] | None = None,
         json: object | None = None,
+        expected_status: int | None = None,
     ) -> Any:
         headers = {"X-Request-ID": request_id}
         if self.service_auth_token:
@@ -78,7 +79,7 @@ class LeadServiceClient:
                 raise LeadServiceProtocolError("lead service request failed")
             raise LeadServiceResponseError(response.status_code, messages[response.status_code])
 
-        if response.status_code != (201 if method == "POST" else 200):
+        if response.status_code != (expected_status or (201 if method == "POST" else 200)):
             raise LeadServiceProtocolError("unexpected lead service response status")
         try:
             return response.json()
@@ -120,4 +121,80 @@ class LeadServiceClient:
             "GET",
             f"/v1/leads/{lead_id}/qualification",
             request_id=request_id,
+        )
+
+
+class ConversationServiceClient(LeadServiceClient):
+    """Conversation Service client sharing the Gateway's safe HTTP boundary."""
+
+    async def create_conversation(self, *, request_id: str, payload: object) -> Any:
+        return await self.request("POST", "/v1/conversations", request_id=request_id, json=payload)
+
+    async def get_conversation(self, *, request_id: str, conversation_id: UUID) -> Any:
+        return await self.request(
+            "GET", f"/v1/conversations/{conversation_id}", request_id=request_id
+        )
+
+    async def transition_conversation(
+        self, *, request_id: str, conversation_id: UUID, payload: object
+    ) -> Any:
+        return await self.request(
+            "POST",
+            f"/v1/conversations/{conversation_id}/transitions",
+            request_id=request_id,
+            json=payload,
+            expected_status=200,
+        )
+
+    async def create_call(self, *, request_id: str, conversation_id: UUID, payload: object) -> Any:
+        return await self.request(
+            "POST",
+            f"/v1/conversations/{conversation_id}/calls",
+            request_id=request_id,
+            json=payload,
+        )
+
+    async def transition_call(
+        self, *, request_id: str, conversation_id: UUID, call_id: UUID, payload: object
+    ) -> Any:
+        return await self.request(
+            "POST",
+            f"/v1/conversations/{conversation_id}/calls/{call_id}/transitions",
+            request_id=request_id,
+            json=payload,
+            expected_status=200,
+        )
+
+    async def ingest_turn(self, *, request_id: str, conversation_id: UUID, payload: object) -> Any:
+        return await self.request(
+            "POST",
+            f"/v1/conversations/{conversation_id}/turns",
+            request_id=request_id,
+            json=payload,
+            expected_status=200,
+        )
+
+    async def live_state(self, *, request_id: str, conversation_id: UUID) -> Any:
+        return await self.request(
+            "GET", f"/v1/conversations/{conversation_id}/live-state", request_id=request_id
+        )
+
+    async def history(
+        self, *, request_id: str, conversation_id: UUID, params: Mapping[str, str | int | None]
+    ) -> Any:
+        return await self.request(
+            "GET",
+            f"/v1/conversations/{conversation_id}/history",
+            request_id=request_id,
+            params=params,
+        )
+
+    async def transcript(
+        self, *, request_id: str, conversation_id: UUID, params: Mapping[str, str | int | None]
+    ) -> Any:
+        return await self.request(
+            "GET",
+            f"/v1/conversations/{conversation_id}/transcript",
+            request_id=request_id,
+            params=params,
         )

@@ -14,6 +14,20 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
 from starlette.exceptions import HTTPException
 from starlette.responses import Response
+from voice_platform_contracts.conversation import (
+    CallCreate,
+    CallResponse,
+    CallTransition,
+    ConversationCreate,
+    ConversationLiveState,
+    ConversationResponse,
+    ConversationTransition,
+    ConversationTurn,
+    ConversationTurnResponse,
+    MessageHistoryResponse,
+    TranscriptHistoryResponse,
+    TranscriptQuery,
+)
 from voice_platform_contracts.http import normalize_request_id
 from voice_platform_contracts.lead import (
     HealthResponse,
@@ -25,6 +39,7 @@ from voice_platform_contracts.lead import (
 )
 
 from .client import (
+    ConversationServiceClient,
     LeadServiceClient,
     LeadServiceProtocolError,
     LeadServiceResponseError,
@@ -51,6 +66,7 @@ def create_app(
     *,
     settings: GatewaySettings | None = None,
     client: LeadServiceClient | None = None,
+    conversation_client: ConversationServiceClient | None = None,
 ) -> FastAPI:
     """Create the Gateway with injectable settings and client for tests."""
 
@@ -60,6 +76,7 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if client is not None:
             app.state.lead_client = client
+            app.state.conversation_client = conversation_client or client
             yield
             return
 
@@ -68,9 +85,18 @@ def create_app(
             base_url=gateway_settings.lead_service_url,
             timeout=timeout,
         )
+        conversation_http_client = httpx.AsyncClient(
+            base_url=gateway_settings.conversation_service_url,
+            timeout=timeout,
+        )
         app.state.http_client = http_client
         app.state.lead_client = LeadServiceClient(
             http_client,
+            service_auth_token=gateway_settings.service_auth_token,
+            timeout_seconds=gateway_settings.request_timeout_seconds,
+        )
+        app.state.conversation_client = ConversationServiceClient(
+            conversation_http_client,
             service_auth_token=gateway_settings.service_auth_token,
             timeout_seconds=gateway_settings.request_timeout_seconds,
         )
@@ -78,6 +104,7 @@ def create_app(
             yield
         finally:
             await http_client.aclose()
+            await conversation_http_client.aclose()
 
     app = FastAPI(title="API Gateway", version="0.1.0", lifespan=lifespan)
 
@@ -143,6 +170,9 @@ def create_app(
 
     def request_id(request: Request) -> str:
         return cast(str, request.state.request_id)
+
+    def get_conversation_client(request: Request) -> ConversationServiceClient:
+        return cast(ConversationServiceClient, request.app.state.conversation_client)
 
     @app.get("/health")
     async def health(
@@ -218,6 +248,134 @@ def create_app(
             request_id=request_id(request), lead_id=lead_id
         )
         return validate_response(QualificationResponse, result)
+
+    @app.post("/v1/conversations", response_model=ConversationResponse, status_code=201)
+    async def create_conversation(
+        request: Request,
+        payload: ConversationCreate,
+        conversation_client: ConversationServiceClient = Depends(get_conversation_client),
+    ) -> ConversationResponse:
+        result = await conversation_client.create_conversation(
+            request_id=request_id(request), payload=payload.model_dump(mode="json")
+        )
+        return validate_response(ConversationResponse, result)
+
+    @app.get("/v1/conversations/{conversation_id}", response_model=ConversationResponse)
+    async def get_conversation(
+        request: Request,
+        conversation_id: UUID,
+        conversation_client: ConversationServiceClient = Depends(get_conversation_client),
+    ) -> ConversationResponse:
+        result = await conversation_client.get_conversation(
+            request_id=request_id(request), conversation_id=conversation_id
+        )
+        return validate_response(ConversationResponse, result)
+
+    @app.post(
+        "/v1/conversations/{conversation_id}/transitions", response_model=ConversationResponse
+    )
+    async def transition_conversation(
+        request: Request,
+        conversation_id: UUID,
+        payload: ConversationTransition,
+        conversation_client: ConversationServiceClient = Depends(get_conversation_client),
+    ) -> ConversationResponse:
+        result = await conversation_client.transition_conversation(
+            request_id=request_id(request),
+            conversation_id=conversation_id,
+            payload=payload.model_dump(mode="json"),
+        )
+        return validate_response(ConversationResponse, result)
+
+    @app.post(
+        "/v1/conversations/{conversation_id}/calls", response_model=CallResponse, status_code=201
+    )
+    async def create_call(
+        request: Request,
+        conversation_id: UUID,
+        payload: CallCreate,
+        conversation_client: ConversationServiceClient = Depends(get_conversation_client),
+    ) -> CallResponse:
+        result = await conversation_client.create_call(
+            request_id=request_id(request),
+            conversation_id=conversation_id,
+            payload=payload.model_dump(mode="json"),
+        )
+        return validate_response(CallResponse, result)
+
+    @app.post(
+        "/v1/conversations/{conversation_id}/calls/{call_id}/transitions",
+        response_model=CallResponse,
+    )
+    async def transition_call(
+        request: Request,
+        conversation_id: UUID,
+        call_id: UUID,
+        payload: CallTransition,
+        conversation_client: ConversationServiceClient = Depends(get_conversation_client),
+    ) -> CallResponse:
+        result = await conversation_client.transition_call(
+            request_id=request_id(request),
+            conversation_id=conversation_id,
+            call_id=call_id,
+            payload=payload.model_dump(mode="json"),
+        )
+        return validate_response(CallResponse, result)
+
+    @app.post("/v1/conversations/{conversation_id}/turns", response_model=ConversationTurnResponse)
+    async def ingest_turn(
+        request: Request,
+        conversation_id: UUID,
+        payload: ConversationTurn,
+        conversation_client: ConversationServiceClient = Depends(get_conversation_client),
+    ) -> ConversationTurnResponse:
+        result = await conversation_client.ingest_turn(
+            request_id=request_id(request),
+            conversation_id=conversation_id,
+            payload=payload.model_dump(mode="json"),
+        )
+        return validate_response(ConversationTurnResponse, result)
+
+    @app.get("/v1/conversations/{conversation_id}/live-state", response_model=ConversationLiveState)
+    async def live_state(
+        request: Request,
+        conversation_id: UUID,
+        conversation_client: ConversationServiceClient = Depends(get_conversation_client),
+    ) -> ConversationLiveState:
+        result = await conversation_client.live_state(
+            request_id=request_id(request), conversation_id=conversation_id
+        )
+        return validate_response(ConversationLiveState, result)
+
+    @app.get("/v1/conversations/{conversation_id}/history", response_model=MessageHistoryResponse)
+    async def message_history(
+        request: Request,
+        conversation_id: UUID,
+        query: TranscriptQuery = Depends(),
+        conversation_client: ConversationServiceClient = Depends(get_conversation_client),
+    ) -> MessageHistoryResponse:
+        result = await conversation_client.history(
+            request_id=request_id(request),
+            conversation_id=conversation_id,
+            params=query.model_dump(exclude_none=True),
+        )
+        return validate_response(MessageHistoryResponse, result)
+
+    @app.get(
+        "/v1/conversations/{conversation_id}/transcript", response_model=TranscriptHistoryResponse
+    )
+    async def transcript_history(
+        request: Request,
+        conversation_id: UUID,
+        query: TranscriptQuery = Depends(),
+        conversation_client: ConversationServiceClient = Depends(get_conversation_client),
+    ) -> TranscriptHistoryResponse:
+        result = await conversation_client.transcript(
+            request_id=request_id(request),
+            conversation_id=conversation_id,
+            params=query.model_dump(exclude_none=True),
+        )
+        return validate_response(TranscriptHistoryResponse, result)
 
     return app
 

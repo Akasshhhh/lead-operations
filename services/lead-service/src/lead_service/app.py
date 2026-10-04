@@ -12,6 +12,7 @@ from asyncpg import PostgresError  # type: ignore[import-untyped]
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from pydantic import JsonValue
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
@@ -28,15 +29,20 @@ from .schemas import (
     LeadCreate,
     LeadListResponse,
     LeadResponse,
+    LeadScoreResponse,
     LeadUpdate,
     QualificationAnswerResponse,
     QualificationResponse,
+    QualificationUpdate,
 )
 from .service import (
     DuplicateLeadError,
     LeadNotFoundError,
     LeadService,
     LeadVersionConflictError,
+    QualificationIdempotencyConflictError,
+    QualificationValidationError,
+    QualificationVersionConflictError,
 )
 
 
@@ -137,6 +143,32 @@ def create_app(
             content={"detail": f"stale lead version: {exc}"},
         )
 
+    @app.exception_handler(QualificationVersionConflictError)
+    async def handle_qualification_conflict(
+        _: Request, exc: QualificationVersionConflictError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={"detail": f"stale qualification version: {exc}"},
+        )
+
+    @app.exception_handler(QualificationIdempotencyConflictError)
+    async def handle_idempotency_conflict(
+        _: Request, exc: QualificationIdempotencyConflictError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT, content={"detail": f"turn already used: {exc}"}
+        )
+
+    @app.exception_handler(QualificationValidationError)
+    async def handle_qualification_validation(
+        _: Request, exc: QualificationValidationError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            content={"detail": f"invalid qualification fact: {exc}"},
+        )
+
     @app.get("/health", response_model=HealthResponse, dependencies=[Depends(verify_service_auth)])
     async def health(
         session: AsyncSession = Depends(get_session, scope="function"),
@@ -235,6 +267,53 @@ def create_app(
             answers=[
                 QualificationAnswerResponse.model_validate(answer) for answer in result.answers
             ],
+            score=(
+                LeadScoreResponse(
+                    score=result.score.score,
+                    classification=result.score.classification,
+                    rule_version=result.score.rule_version,
+                    reasons=cast(list[JsonValue], result.score.reasons),
+                    calculated_at=result.score.calculated_at,
+                )
+                if result.score is not None
+                else None
+            ),
+        )
+
+    @app.post(
+        "/v1/leads/{lead_id}/qualification/updates",
+        response_model=QualificationResponse,
+        dependencies=[Depends(verify_service_auth)],
+    )
+    async def update_qualification(
+        request: Request,
+        lead_id: UUID,
+        data: QualificationUpdate,
+        session: AsyncSession = Depends(get_session, scope="function"),
+    ) -> QualificationResponse:
+        result = await LeadService(
+            session, request_id=request.state.request_id
+        ).apply_qualification_update(lead_id, data)
+        return QualificationResponse(
+            profile_id=result.profile.id,
+            lead_id=result.profile.lead_id,
+            status=result.profile.status,
+            completeness=result.profile.completeness,
+            version=result.profile.version,
+            answers=[
+                QualificationAnswerResponse.model_validate(answer) for answer in result.answers
+            ],
+            score=(
+                LeadScoreResponse(
+                    score=result.score.score,
+                    classification=result.score.classification,
+                    rule_version=result.score.rule_version,
+                    reasons=cast(list[JsonValue], result.score.reasons),
+                    calculated_at=result.score.calculated_at,
+                )
+                if result.score is not None
+                else None
+            ),
         )
 
     return app

@@ -7,9 +7,10 @@ audit are corrected. Verification passed: **89 library/API/database regression
 tests**, **5 opt-in Compose deployment tests**, Ruff lint/format, strict mypy,
 dependency checking, and migration upgrade/downgrade/drift checks.
 
-Module 6 remains unstarted. Scope: configuration/deployment, the 21-table
-persistence foundation, Lead APIs and synthetic seeding, the REST Gateway, and
-event transport/relay/consumer primitives.
+At the time of this audit Module 6 was unstarted. Module 6 has since been
+implemented separately; see [`module-6.md`](module-6.md) and the Module 6 status
+section in `implementation-plan.md`. This record remains the audit of the
+Modules 1–5 foundation.
 
 ## Findings and corrections
 

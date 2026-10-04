@@ -16,7 +16,7 @@ option if throughput or replay requirements change.
 ## ADR-003: PostgreSQL as durable source of truth
 
 PostgreSQL owns business state, transcripts, event outbox records, and
-evaluation results. Redis is never the authoritative store.
+persisted evaluation results when used. Redis is never the authoritative store.
 
 ## ADR-004: Provider routers inside Voice Runtime initially
 
@@ -67,3 +67,46 @@ A Redis distributed mutex would add another failure dependency without improving
 this transaction boundary. Concurrent consumer completion is not globally ordered.
 The Redis adapter uses XPENDING/XCLAIM to apply per-entry retry delay, equivalent
 to XAUTOCLAIM recovery with explicit visibility checks.
+
+## ADR-009: One active conversation per lead and Lead-authoritative recovery
+
+The Module 6 business invariant is intentional: one nonterminal conversation per
+lead, enforced by a PostgreSQL partial unique index, and one active call per
+conversation. Serial live qualification flows avoid competing ownership of one
+Lead profile. Historical conversations/calls remain available; call connection
+state is independent of business conversation completion.
+
+Conversation Service commits transcript input before its synchronous Lead call.
+Only Lead Service calculates and persists qualification scores. During Lead
+unavailability, qualification-dependent orchestration pauses and APIs return 503
+without synthesizing or substituting a score. Persisted conversation/history
+reads remain available. Replay with the original turn identity recovers ambiguous
+partial success; later turns and replacement conversations wait for pending work.
+A definitive validation rejection uses the existing `FAILED` turn status and
+permits corrected input under a new turn ID.
+
+Transcript retention excludes terminal conversations with pending turns. The
+final verification adds fingerprints and locking fixes within existing records
+and transactions; it preserves the database models, state graphs, and version 1
+event envelope. See [`modules-1-7-verification.md`](modules-1-7-verification.md).
+
+## ADR-010: Reduced Modules 8–18 product scope
+
+The user-approved remaining roadmap supersedes the original 32-module plan:
+provider interfaces and A/B routers, Pipecat browser voice, tool-driven live
+qualification/scoring, lightweight policies/handoff/follow-up, one dashboard,
+useful observability, E2E evaluation, and final hardening.
+
+Lead/Conversation ownership and the Redis Streams/outbox guarantees remain.
+Pipecat owns media lifecycle; provider routers stay embedded in Voice Runtime;
+business logic stays in domain services. Lightweight workflow execution uses
+existing service/worker boundaries. Evaluation is a test/scenario capability,
+and the Gateway serves one central product UI.
+
+Separate Analytics/Evaluation/Workflow services, generalized workflow/evaluation
+platforms, complex read models, Kafka, Kubernetes, workload-identity infrastructure,
+external business integrations, sophisticated multilingual routing, specialized
+STT variants, automatic retention, multiple dashboards, and elaborate load-test
+infrastructure are deferred. Existing foundational tables/migrations are retained.
+The exact per-module scope, verification gates, and conflict-stop rule are in
+[`implementation-plan.md`](implementation-plan.md). Module 8 is unstarted.

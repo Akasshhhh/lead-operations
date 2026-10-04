@@ -37,6 +37,22 @@ conversation_summaries
 Conversation and transcript records are append-oriented where practical.
 Message and transcript sequence numbers are unique per conversation.
 
+Module 6 uses `messages` and `transcript_segments` for transactional active-call
+turn ingestion. A turn ID is the message identity, making retries idempotent. The
+Conversation Service locks the conversation while allocating sequence numbers.
+Module 7 adds history/search/retention capabilities around these records.
+
+Module 7 adds nullable redaction metadata to both tables: `redacted_at`,
+`redaction_reason`, and `content_sha256`. Redaction replaces content and clears
+metadata while preserving sequence/audit fields. It is restricted to terminal
+conversations without pending turns by an explicit operator command; no automatic
+retention scheduler or second transcript store exists.
+
+Conversation states are guarded by the Conversation Service. Call records are
+call sessions with an independent lifecycle and version. A partial unique index
+prevents more than one active call session per conversation; terminal sessions
+remain queryable for audit and debugging.
+
 ### `workflow`
 
 ```text
@@ -57,6 +73,8 @@ evaluation_results
 ```
 
 Evaluation scenarios and results are independent of production lead mutations.
+The foundational workflow/evaluation tables are retained in the reduced roadmap;
+their presence does not require separate Workflow or Evaluation services.
 
 ### `platform`
 
@@ -76,7 +94,17 @@ Module 5 adds `ix_domain_events_unpublished`, a partial index on
 `(occurred_at, event_id)` where `published_at IS NULL`, in migration
 `6b30f517c820`. The relay uses existing publication-attempt/deadline fields;
 consumer database effects and the `(event_id, consumer_group)` processed marker
-commit in one transaction. No business table fields were changed.
+commit in one transaction. No business table fields were changed by Module 5.
+
+Module 6 adds conversation failure context, call reconnection/failure metadata,
+active conversation and active call-session uniqueness, and the versioned
+qualification-update boundary in the Lead Service. Lead scoring remains in the
+Lead schema and uses `baseline-v1`; Conversation Service stores no authoritative
+score copy.
+
+Final Modules 1–7 verification uses existing message metadata and outbox payloads
+for replay fingerprints/structured failure context. No models or migrations were
+added by that pass; current head remains `e8f2a6b3c901`.
 
 ## Migration workflow
 

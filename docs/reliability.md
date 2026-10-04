@@ -1,4 +1,4 @@
-# Reliability — implemented boundaries through Module 5
+# Reliability — implemented boundaries through Module 7
 
 ## Event path
 
@@ -32,5 +32,65 @@ No stream retention or deduplication-marker expiry is automatic in this stage.
 Deleting markers makes historical replay capable of repeating database effects.
 Replay is an operator action; the commands are documented in the relay README.
 
-Provider, browser transport, conversation, and Pipecat failure boundaries will
+Provider, browser transport, and Pipecat failure boundaries will
 be specified and tested when their modules are implemented.
+
+## Module 6 live-turn path
+
+The active-turn sequence is:
+
+```text
+validated turn → conversation message/transcript commit
+              → synchronous Lead Service qualification/scoring update
+              → authoritative qualification + score
+              → guarded conversation orchestration decision
+```
+
+Turn IDs and Lead Service qualification idempotency keys make client/runtime
+retries safe within their durable receipt lifetime. New recorded-turn event
+fingerprints include call, text, and field-sorted facts. Lead receipts bind lead,
+conversation, and facts; their check occurs after the qualification profile lock.
+Same-input replay returns the current authoritative result, not an exact cached
+copy of the first HTTP reply. Applied turns do not resubmit qualification facts.
+
+| Failure / race | Durable result | Recovery / API behavior |
+|---|---|---|
+| Lead read or update unavailable / timed out | Recorded message, transcript, facts, and event survive; turn PENDING; conversation/call versions unchanged | 503, no local or stale score fallback; retry original UUID/call/text/facts after recovery |
+| Lead committed but reply lost | Qualification, score/history, and Lead receipt survive; Conversation turn PENDING | Same key verifies the receipt without another Lead effect, then finalizes Conversation |
+| Conversation finalization fails before COMMIT | Lead result survives; recorded turn remains PENDING, finalization effects roll back | Replay finishes state/action and applied event once |
+| Two concurrent identical retries | Profile and Conversation/Message locks serialize writes; refreshed ORM rows observe committed state | Both can succeed; one qualification history/event and one finalization effect |
+| Late duplicate request fails | APPLIED or definitively rejected FAILED turn is preserved | Cannot reset durable outcome to PENDING |
+| New turn or replacement overtakes pending work | Pending turn is retained, including in a terminal conversation | Controlled 409; finish original operation first |
+| Lead qualification reply is invalid or for another lead / mutation omits score | No unvalidated result is used for orchestration | Controlled 503 and pending recovery; never calculate or substitute score locally |
+| Lead definitively rejects invalid confirmed facts | Lead mutation rolls back; transcript retained as FAILED turn | 422; corrected facts use a new turn UUID, without blocking the conversation forever |
+| Late result after conversation/call terminates | Accepted pending input can apply, but terminal conversation state is retained | Original replay may complete after call ends; no resurrection |
+
+Live-state reads require Lead and return 503 on its outage. Conversation,
+history, and transcript reads remain available while PostgreSQL and Conversation
+Service are available. Runtime/dashboard clients must pause qualification-dependent
+actions and show unavailable status; call connection does not implicitly change.
+
+The one-active-conversation-per-lead invariant is intentional and PostgreSQL-
+enforced, including concurrent creation. New conversations are allowed after a
+terminal predecessor has no pending work. Failure transitions require a reason,
+valid graph edge, and matching version; structured reason/context and timestamps
+commit with their outbox event. The call and conversation graphs are unchanged.
+
+Legacy receipts remain compatible and are not rewritten. Older Conversation
+events without a fact fingerprint retain text/call checks, using a content hash
+after redaction; they cannot reconstruct an original unstored fact payload.
+No background pending-turn scheduler or distributed transaction is added.
+
+## Module 7 retention boundary
+
+History reads are bounded by page size and sequence cursors; search is scoped to a
+conversation and excludes redacted content. Retention is an operator-run,
+batch-bounded operation. It locks only eligible terminal message/segment rows
+from conversations without pending turns, so active/recovering input is not
+redacted. Repeating a completed batch finds no already
+redacted rows and is safe. A failed batch transaction rolls back its redaction
+metadata/content changes; the operator can rerun the command.
+
+The recorded-turn fingerprint remains available after content redaction;
+identical replay cannot restore the original text/metadata or duplicate score
+history. Verification: [`modules-1-7-verification.md`](modules-1-7-verification.md).

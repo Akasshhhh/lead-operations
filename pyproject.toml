@@ -30,6 +30,7 @@ packages = [
     "event_relay",
     "voice_platform_events",
     "lead_service",
+    "conversation_service",
     "api_gateway",
     "voice_platform_contracts",
     "voice_platform_config",
@@ -43,6 +44,7 @@ voice_platform_events = "packages/event-bus/voice_platform_events"
 api_gateway = "apps/api-gateway/src/api_gateway"
 voice_platform_contracts = "packages/contracts/voice_platform_contracts"
 lead_service = "services/lead-service/src/lead_service"
+conversation_service = "services/conversation-service/src/conversation_service"
 voice_platform_config = "packages/configuration/voice_platform_config"
 voice_platform_db = "packages/database/voice_platform_db"
 "voice_platform_db.models" = "packages/database/voice_platform_db/models"
@@ -56,6 +58,7 @@ pythonpath = [
     "packages/database",
     "packages/contracts",
     "services/lead-service/src",
+    "services/conversation-service/src",
     "apps/api-gateway/src",
 ]
 addopts = "-ra"
@@ -75,11 +78,19 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.ruff.lint.per-file-ignores]
 "services/lead-service/src/lead_service/app.py" = ["B008"]
 "apps/api-gateway/src/api_gateway/app.py" = ["B008"]
+"services/conversation-service/src/conversation_service/app.py" = ["B008"]
 
 [tool.mypy]
 python_version = "3.12"
 strict = true
-files = ["packages", "services/lead-service/src", "apps/api-gateway/src", "workers", "tests"]
+files = [
+    "packages",
+    "services/lead-service/src",
+    "services/conversation-service/src",
+    "apps/api-gateway/src",
+    "workers",
+    "tests",
+]
 mypy_path = [
     "packages/event-bus",
     "workers/event-relay/src",
@@ -87,5 +98,6 @@ mypy_path = [
     "packages/database",
     "packages/contracts",
     "services/lead-service/src",
+    "services/conversation-service/src",
     "apps/api-gateway/src",
 ]

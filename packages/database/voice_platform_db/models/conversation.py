@@ -9,6 +9,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -32,6 +33,12 @@ class Conversation(Base):
             "'SCORING', 'DECISION', 'FOLLOW_UP', 'HUMAN_HANDOFF', 'COMPLETED', 'FAILED')",
             name="conversation_state_values",
         ),
+        Index(
+            "uq_conversation_one_active_per_lead",
+            "lead_id",
+            unique=True,
+            postgresql_where=sql_text("state NOT IN ('COMPLETED', 'FAILED')"),
+        ),
         {"schema": "conversation"},
     )
 
@@ -42,6 +49,12 @@ class Conversation(Base):
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failure_reason: Mapped[str | None] = mapped_column(String(160))
+    failure_context: Mapped[object] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    next_action: Mapped[str | None] = mapped_column(String(80))
+    last_turn_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now, server_default=sql_text("now()")
@@ -62,6 +75,14 @@ class Call(Base):
             "status IN ('CREATED', 'CONNECTING', 'CONNECTED', 'RECONNECTING', 'ENDED', 'FAILED')",
             name="call_status_values",
         ),
+        Index(
+            "uq_call_one_active_per_conversation",
+            "conversation_id",
+            unique=True,
+            postgresql_where=sql_text(
+                "status IN ('CREATED', 'CONNECTING', 'CONNECTED', 'RECONNECTING')"
+            ),
+        ),
         {"schema": "conversation"},
     )
 
@@ -77,10 +98,16 @@ class Call(Base):
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, default="CREATED", server_default="CREATED"
     )
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    reconnect_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     runtime_instance_id: Mapped[str | None] = mapped_column(String(120))
     connected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     disconnect_reason: Mapped[str | None] = mapped_column(String(160))
+    failure_reason: Mapped[str | None] = mapped_column(String(160))
+    failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now, server_default=sql_text("now()")
     )
@@ -94,6 +121,16 @@ class Message(Base):
         ),
         UniqueConstraint(
             "conversation_id", "sequence_number", name="uq_message_conversation_sequence"
+        ),
+        CheckConstraint(
+            "turn_status IN ('PENDING', 'APPLIED', 'FAILED')",
+            name="message_turn_status_values",
+        ),
+        Index(
+            "uq_message_one_pending_per_conversation",
+            "conversation_id",
+            unique=True,
+            postgresql_where=sql_text("turn_status = 'PENDING'"),
         ),
         {"schema": "conversation"},
     )
@@ -116,6 +153,14 @@ class Message(Base):
     message_metadata: Mapped[object] = mapped_column(
         "metadata", JSONB, nullable=False, default=dict, server_default="{}"
     )
+    turn_status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="PENDING", server_default="PENDING"
+    )
+    qualification_error: Mapped[str | None] = mapped_column(Text)
+    qualification_update_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    redacted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    redaction_reason: Mapped[str | None] = mapped_column(String(80))
+    content_sha256: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now, server_default=sql_text("now()")
     )
@@ -159,6 +204,9 @@ class TranscriptSegment(Base):
     segment_metadata: Mapped[object] = mapped_column(
         "metadata", JSONB, nullable=False, default=dict, server_default="{}"
     )
+    redacted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    redaction_reason: Mapped[str | None] = mapped_column(String(80))
+    content_sha256: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now, server_default=sql_text("now()")
     )

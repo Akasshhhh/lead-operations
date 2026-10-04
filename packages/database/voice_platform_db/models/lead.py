@@ -101,6 +101,7 @@ class QualificationAnswer(Base):
     )
     field_key: Mapped[str] = mapped_column(String(80), nullable=False)
     value: Mapped[object] = mapped_column(JSONB, nullable=False)
+    conflict_value: Mapped[object | None] = mapped_column(JSONB)
     normalized_value: Mapped[str | None] = mapped_column(Text)
     confidence: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
     answer_status: Mapped[str] = mapped_column(
@@ -134,6 +135,9 @@ class LeadScore(Base):
     score: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     classification: Mapped[str] = mapped_column(
         String(16), nullable=False, default="COLD", server_default="COLD"
+    )
+    reasons: Mapped[object] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="[]"
     )
     rule_version: Mapped[str] = mapped_column(String(32), nullable=False)
     calculated_at: Mapped[datetime] = mapped_column(
