@@ -1,0 +1,317 @@
+[
+  {
+    "display_name": "Arjun Mehta",
+    "synthetic_profile_key": "canada-pr-high-intent",
+    "intent": "Canada PR",
+    "target_country": "Canada",
+    "preferred_language": "en",
+    "initial_answers": {
+      "education_level": "masters",
+      "years_experience": 8,
+      "english_level": "advanced",
+      "has_job_offer": false,
+      "budget_ready": true,
+      "urgency": "high"
+    }
+  },
+  {
+    "display_name": "Sofia Laurent",
+    "synthetic_profile_key": "canada-pr-low-intent",
+    "intent": "Canada PR",
+    "target_country": "Canada",
+    "preferred_language": "en",
+    "initial_answers": {
+      "education_level": "bachelors",
+      "years_experience": 3,
+      "english_level": "intermediate",
+      "has_job_offer": false,
+      "budget_ready": false,
+      "urgency": "low"
+    }
+  },
+  {
+    "display_name": "Daniel Okafor",
+    "synthetic_profile_key": "uk-skilled-worker",
+    "intent": "UK skilled worker visa",
+    "target_country": "United Kingdom",
+    "preferred_language": "en",
+    "initial_answers": {
+      "education_level": "bachelors",
+      "years_experience": 6,
+      "english_level": "advanced",
+      "has_job_offer": true,
+      "budget_ready": true,
+      "urgency": "high"
+    }
+  },
+  {
+    "display_name": "Maya Chen",
+    "synthetic_profile_key": "australia-study",
+    "intent": "Australia study visa",
+    "target_country": "Australia",
+    "preferred_language": "en",
+    "initial_answers": {
+      "education_level": "bachelors",
+      "years_experience": 1,
+      "english_level": "advanced",
+      "has_job_offer": false,
+      "budget_ready": true,
+      "urgency": "medium"
+    }
+  },
+  {
+    "display_name": "Ibrahim Hassan",
+    "synthetic_profile_key": "incomplete-profile",
+    "intent": "Canada PR",
+    "target_country": "Canada",
+    "preferred_language": "en",
+    "initial_answers": {
+      "education_level": "unknown",
+      "years_experience": 2
+    }
+  },
+  {
+    "display_name": "Priya Nair",
+    "synthetic_profile_key": "contradictory-profile",
+    "intent": "UK skilled worker visa",
+    "target_country": "United Kingdom",
+    "preferred_language": "en",
+    "initial_answers": {
+      "education_level": "masters",
+      "years_experience": 0,
+      "english_level": "advanced",
+      "has_job_offer": true,
+      "budget_ready": false,
+      "urgency": "medium"
+    }
+  },
+  {
+    "display_name": "Lucas Pereira",
+    "synthetic_profile_key": "returning-caller",
+    "intent": "Canada PR",
+    "target_country": "Canada",
+    "preferred_language": "en",
+    "initial_answers": {
+      "education_level": "masters",
+      "years_experience": 5,
+      "english_level": "advanced",
+      "has_job_offer": false,
+      "budget_ready": true,
+      "urgency": "medium"
+    }
+  },
+  {
+    "display_name": "Aisha Rahman",
+    "synthetic_profile_key": "human-escalation",
+    "intent": "Immigration eligibility advice",
+    "target_country": "Canada",
+    "preferred_language": "en",
+    "initial_answers": {
+      "education_level": "bachelors",
+      "years_experience": 7,
+      "english_level": "advanced",
+      "has_job_offer": false,
+      "budget_ready": true,
+      "urgency": "high",
+      "human_requested": true
+    }
+  },
+  {
+    "display_name": "Noah Williams",
+    "synthetic_profile_key": "long-conversation",
+    "intent": "Australia work visa",
+    "target_country": "Australia",
+    "preferred_language": "en",
+    "initial_answers": {
+      "education_level": "masters",
+      "years_experience": 10,
+      "english_level": "advanced",
+      "has_job_offer": false,
+      "budget_ready": true,
+      "urgency": "medium"
+    }
+  },
+  {
+    "display_name": "Elena Petrova",
+    "synthetic_profile_key": "follow-up-required",
+    "intent": "Canada PR",
+    "target_country": "Canada",
+    "preferred_language": "en",
+    "initial_answers": {
+      "education_level": "bachelors",
+      "years_experience": 4,
+      "english_level": "intermediate",
+      "has_job_offer": false,
+      "budget_ready": true,
+      "urgency": "medium",
+      "follow_up_required": true
+    }
+  },
+  {
+    "display_name": "Samuel Adeyemi",
+    "synthetic_profile_key": "canada-job-offer",
+    "intent": "Canada work permit",
+    "target_country": "Canada",
+    "preferred_language": "en",
+    "initial_answers": {
+      "education_level": "bachelors",
+      "years_experience": 5,
+      "english_level": "advanced",
+      "has_job_offer": true,
+      "budget_ready": true,
+      "urgency": "high"
+    }
+  },
+  {
+    "display_name": "Hana Kim",
+    "synthetic_profile_key": "australia-study-budget",
+    "intent": "Australia study visa",
+    "target_country": "Australia",
+    "preferred_language": "en",
+    "initial_answers": {
+      "education_level": "high-school",
+      "years_experience": 0,
+      "english_level": "intermediate",
+      "has_job_offer": false,
+      "budget_ready": false,
+      "urgency": "low"
+    }
+  },
+  {
+    "display_name": "Omar Haddad",
+    "synthetic_profile_key": "uk-family-route",
+    "intent": "UK family visa",
+    "target_country": "United Kingdom",
+    "preferred_language": "en",
+    "initial_answers": {
+      "education_level": "bachelors",
+      "years_experience": 2,
+      "english_level": "intermediate",
+      "has_job_offer": false,
+      "budget_ready": true,
+      "urgency": "high"
+    }
+  },
+  {
+    "display_name": "Grace Mensah",
+    "synthetic_profile_key": "canada-experience-gap",
+    "intent": "Canada PR",
+    "target_country": "Canada",
+    "preferred_language": "en",
+    "initial_answers": {
+      "education_level": "diploma",
+      "years_experience": 9,
+      "english_level": "intermediate",
+      "has_job_offer": false,
+      "budget_ready": true,
+      "urgency": "medium"
+    }
+  },
+  {
+    "display_name": "Mateo Silva",
+    "synthetic_profile_key": "new-graduate",
+    "intent": "Canada study permit",
+    "target_country": "Canada",
+    "preferred_language": "en",
+    "initial_answers": {
+      "education_level": "bachelors",
+      "years_experience": 0,
+      "english_level": "advanced",
+      "has_job_offer": false,
+      "budget_ready": true,
+      "urgency": "medium"
+    }
+  },
+  {
+    "display_name": "Nadia Volkov",
+    "synthetic_profile_key": "australia-skilled",
+    "intent": "Australia skilled migration",
+    "target_country": "Australia",
+    "preferred_language": "en",
+    "initial_answers": {
+      "education_level": "masters",
+      "years_experience": 8,
+      "english_level": "advanced",
+      "has_job_offer": false,
+      "budget_ready": true,
+      "urgency": "high"
+    }
+  },
+  {
+    "display_name": "Ethan Brooks",
+    "synthetic_profile_key": "low-budget-inquiry",
+    "intent": "UK skilled worker visa",
+    "target_country": "United Kingdom",
+    "preferred_language": "en",
+    "initial_answers": {
+      "education_level": "bachelors",
+      "years_experience": 4,
+      "english_level": "intermediate",
+      "has_job_offer": false,
+      "budget_ready": false,
+      "urgency": "low"
+    }
+  },
+  {
+    "display_name": "Fatima Noor",
+    "synthetic_profile_key": "returning-follow-up",
+    "intent": "Canada PR",
+    "target_country": "Canada",
+    "preferred_language": "en",
+    "initial_answers": {
+      "education_level": "masters",
+      "years_experience": 6,
+      "english_level": "advanced",
+      "has_job_offer": false,
+      "budget_ready": true,
+      "urgency": "high",
+      "follow_up_required": true
+    }
+  },
+  {
+    "display_name": "Jonas Berg",
+    "synthetic_profile_key": "policy-question",
+    "intent": "Immigration eligibility question",
+    "target_country": "Australia",
+    "preferred_language": "en",
+    "initial_answers": {
+      "education_level": "bachelors",
+      "years_experience": 5,
+      "english_level": "advanced",
+      "has_job_offer": false,
+      "budget_ready": true,
+      "urgency": "medium",
+      "asks_for_guarantee": true
+    }
+  },
+  {
+    "display_name": "Leila Costa",
+    "synthetic_profile_key": "part-time-experience",
+    "intent": "Canada PR",
+    "target_country": "Canada",
+    "preferred_language": "en",
+    "initial_answers": {
+      "education_level": "bachelors",
+      "years_experience": 3,
+      "english_level": "advanced",
+      "has_job_offer": false,
+      "budget_ready": true,
+      "urgency": "medium"
+    }
+  },
+  {
+    "display_name": "Yusuf Karim",
+    "synthetic_profile_key": "multi-country-interest",
+    "intent": "Compare Canada and Australia options",
+    "target_country": "Canada",
+    "preferred_language": "en",
+    "initial_answers": {
+      "education_level": "masters",
+      "years_experience": 7,
+      "english_level": "advanced",
+      "has_job_offer": false,
+      "budget_ready": true,
+      "urgency": "low"
+    }
+  }
+]

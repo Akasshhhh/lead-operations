@@ -1,0 +1,9 @@
+{
+  "name": "voice-ai-platform",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=22 <23"
+  },
+  "packageManager": "npm@10"
+}

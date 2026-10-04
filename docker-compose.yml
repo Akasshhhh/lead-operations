@@ -1,0 +1,123 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-voice_ai}
+      POSTGRES_USER: ${POSTGRES_USER:-voice_ai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-voice_ai_dev_password}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - voice_ai
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - voice_ai
+
+  db-migrate:
+    build:
+      context: .
+      dockerfile: services/lead-service/Dockerfile
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:-voice_ai}
+      POSTGRES_USER: ${POSTGRES_USER:-voice_ai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-voice_ai_dev_password}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - voice_ai
+    restart: "no"
+
+  lead-service:
+    build:
+      context: .
+      dockerfile: services/lead-service/Dockerfile
+    environment:
+      APP_ENV: ${APP_ENV:-local}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:-voice_ai}
+      POSTGRES_USER: ${POSTGRES_USER:-voice_ai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-voice_ai_dev_password}
+      LEAD_SERVICE_AUTH_TOKEN: ${LEAD_SERVICE_AUTH_TOKEN:-local-lead-service-token}
+    expose:
+      - "8001"
+    depends_on:
+      db-migrate:
+        condition: service_completed_successfully
+    networks:
+      - voice_ai
+
+  event-relay:
+    build:
+      context: .
+      dockerfile: workers/event-relay/Dockerfile
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:-voice_ai}
+      POSTGRES_USER: ${POSTGRES_USER:-voice_ai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-voice_ai_dev_password}
+      REDIS_URL: redis://redis:6379/0
+      EVENT_MAX_ATTEMPTS: ${EVENT_MAX_ATTEMPTS:-5}
+      EVENT_POLL_SECONDS: ${EVENT_POLL_SECONDS:-0.5}
+    depends_on:
+      db-migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    stop_grace_period: 15s
+    networks:
+      - voice_ai
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: apps/api-gateway/Dockerfile
+    environment:
+      APP_ENV: ${APP_ENV:-local}
+      LEAD_SERVICE_URL: http://lead-service:8001
+      LEAD_SERVICE_AUTH_TOKEN: ${LEAD_SERVICE_AUTH_TOKEN:-local-lead-service-token}
+      LEAD_SERVICE_TIMEOUT_SECONDS: ${LEAD_SERVICE_TIMEOUT_SECONDS:-5}
+    ports:
+      - "${API_GATEWAY_PORT:-8000}:8000"
+    depends_on:
+      lead-service:
+        condition: service_started
+    networks:
+      - voice_ai
+
+networks:
+  voice_ai:
+    name: voice_ai
+
+volumes:
+  postgres_data:
+    name: voice_ai_postgres_data
+  redis_data:
+    name: voice_ai_redis_data
