@@ -2,40 +2,15 @@
 
 ## Status
 
-This is the approved reduced architecture and roadmap. Modules 1–5 provide
-repository tooling, local PostgreSQL/Redis infrastructure, the initial database
-schema, the Lead Service, the API Gateway, and a Redis Streams event transport
-with an independent outbox relay. Module 6 adds the Conversation Service and
-durable call-session/turn boundary; Module 7 adds history, search, and operator
-retention. Their final reliability verification is recorded in
-[`modules-1-7-verification.md`](modules-1-7-verification.md).
+Modules 1–18 are implemented, including final hardening and the demo/runbook.
+The current contracts, verification and limits are maintained in
+[implementation-plan.md](implementation-plan.md). Historical provider-boundary
+notes remain in module documents; current repository code takes precedence.
 
-Modules 8–18 build one browser voice qualification product and central dashboard;
-see [`implementation-plan.md`](implementation-plan.md). Provider integrations and
-Pipecat are planned. Module 8 supplies the vendor-independent LLM contracts,
-stateless runtime/local test adapter, and deterministic mock in
-`packages/llm/voice_platform_llm`; see [`module-8.md`](module-8.md).
-Module 9 adds OpenAI/OpenRouter HTTP adapters, capability selection, bounded
-retries/deadlines, and runtime-local circuit recovery; see
-[`module-9.md`](module-9.md). The package
-owns no durable state and does not execute business tools or change the existing
-live-turn path. Buffered generation may fail over after discarding an incomplete
-attempt; live streams propagate failures after any exposed output without replay.
-
-Module 10 adds `packages/speech/voice_platform_speech`: bounded mono PCM,
-interim/final transcript and synthesis streams, closable STT/TTS protocols,
-stateless deadline/validation adapters, and deterministic mocks. It owns no
-transcript store, playback, VAD, or call state. Sample offsets are utterance-local;
-future runtime integration uses the existing Conversation persistence boundary.
-See [`module-10.md`](module-10.md) for speech contracts.
-
-Module 11 adds request-scoped Sarvam realtime STT and Sarvam/Rumik HTTP PCM TTS
-adapters. Separate STT/TTS routers implement capability selection, bounded
-recovery and process-local health. Both real voice paths share Sarvam STT;
-TTS failover selects Sarvam/Rumik only before exposed audio. STT retries retain
-bounded request-local audio and stop after any transcript output or an unsafe
-interrupted input read. No service/domain ownership changes. Module 12
-(Pipecat/browser runtime) is next; see [`module-11.md`](module-11.md).
+The product is one Next.js dashboard, one public Gateway with optional Pipecat
+media runtime, Lead and Conversation domain services, PostgreSQL, Redis Streams
+and an independent event relay. No new Workflow/Evaluation/Analytics service is
+introduced. Evaluation/demo commands reuse existing test and persistence paths.
 
 ## Service boundaries
 
@@ -47,13 +22,13 @@ interrupted input read. No service/domain ownership changes. Module 12
 - **Dashboard:** one browser UI for leads, calls, qualification, scores, provider
   health, events, and demo failures, communicating through the Gateway.
 
-Lightweight handoff/follow-up domain operations use existing service/worker
-boundaries in Module 14. Evaluation is a scenario/test capability in Module 17.
+Lightweight handoff/follow-up domain operations use the existing Conversation Service
+boundary from Module 14. Evaluation is a scenario/test capability in Module 17.
 Separate Workflow, Evaluation, and Analytics services are deferred. Provider
-routers are embedded in the planned Voice Runtime.
+routers are embedded in the Gateway-hosted Voice Runtime.
 
-PostgreSQL is the durable source of truth. Redis is used for streams, locks,
-cache, provider health state, and short-lived runtime state. Services own their
+PostgreSQL is the durable source of truth. Redis is used for asynchronous event streams. Provider circuits, fault controls,
+capabilities and media sessions are process-local, not Redis-backed. Services own their
 tables and communicate through APIs and versioned events.
 
 PostgreSQL currently uses the following logical schemas:
@@ -67,7 +42,8 @@ PostgreSQL currently uses the following logical schemas:
 SQLAlchemy models define the schema and Alembic owns versioned migrations. All
 21 foundational tables and their existing schemas remain. The `workflow` and
 `evaluation` tables do not imply separate services in the reduced product scope;
-future domain ownership is resolved before those operations are implemented.
+Conversation owns implemented workflow actions; the evaluation schema remains a
+foundation without a generalized live-call grading service.
 
 The Lead Service commits its mutation and outbox record atomically. The separate
 `workers/event-relay` process publishes committed events to Redis Streams. Redis
@@ -129,10 +105,11 @@ over internal REST on the Compose network, propagates `X-Request-ID`, and sends
 
 ## Real-time path
 
-Module 12 implements this path after the LLM and voice contracts/adapters/routers
-in Modules 8–11. Module 13 integrates qualification tools and live Lead scoring;
-Modules 14–18 complete policies, one dashboard, observability, E2E verification,
-and hardening.
+Module 12 implements media after Modules 8–11 provider boundaries. Module 13
+stages durable user input, freezes confirmed tool facts, and applies them through
+Lead. Module 14 persists workflow actions; Modules 15–17 implement dashboard,
+session diagnostics/faults, and evaluation. Module 18 verifies and hardens these
+boundaries without adding business behavior.
 
 ```text
 Browser WebRTC
@@ -158,3 +135,23 @@ business decisions and persistence.
 - Per-provider timeouts, bounded retries, circuit breakers, and failover.
 - Incremental transcript persistence.
 - Structured logs, metrics, traces, and correlation IDs.
+
+## Runtime, diagnostics and deployment limits
+
+Agent output uses the existing idempotent Conversation message/transcript path
+before TTS. Qualification tools propose facts; Lead validates and scores them.
+Workflow retries persist intent and preserve acknowledgement gaps for recovery.
+Call termination does not implicitly terminate the business conversation.
+
+Next.js proxies a bounded same-origin route set to Gateway. Provider secrets stay
+server-side. Diagnostics expose bounded metadata and process-local observations,
+not durable vendor truth or transcript content. Demo faults require explicit
+local/test enablement plus a live session capability; they do not change domain
+state. Voice runtime admission is bounded to one Gateway process; multi-process
+routing/distributed media recovery is outside the approved scope.
+
+Python containers/migrations run as UID 10001. Authenticated domain health probes
+check database readiness; Gateway health checks Lead and dashboard checks page
+serving. Compose dependency health gates apply on startup, not as an automatic
+recovery controller. Relay inspection measures durable backlog and stream state.
+Paid-provider microphone and Docker media reachability remain unverified.

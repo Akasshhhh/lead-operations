@@ -54,6 +54,7 @@ from voice_platform_speech import (
 )
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
+other_system = system
 
 
 class DashboardProvider:
@@ -492,3 +493,94 @@ async def test_dashboard_fault_reset_recovers_durable_turn_and_media(
         )  # greeting + recovered user; no audio/reply replay
         call = await db.get(Call, system.call_id)
         assert call is not None and call.status == "ENDED" and call.reconnect_attempts >= 1
+
+
+async def test_two_dashboard_calls_keep_media_transcripts_and_scores_isolated(
+    system: System,
+    other_system: System,
+    dashboard: tuple[str, MockSTTProvider],
+) -> None:
+    from playwright.async_api import async_playwright, expect
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(
+            executable_path=os.getenv(
+                "CHROME_EXECUTABLE", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+            ),
+            headless=True,
+            args=[
+                "--use-fake-device-for-media-stream",
+                "--use-fake-ui-for-media-stream",
+                "--autoplay-policy=no-user-gesture-required",
+            ],
+        )
+        try:
+            pages = [await browser.new_page(), await browser.new_page()]
+            origin = dashboard[0].split("?")[0]
+
+            async def start(index: int, s: System) -> None:
+                page = pages[index]
+                await page.goto(f"{origin}?lead={s.lead_id}")
+                await page.get_by_role("button", name="Start / resume call", exact=False).click()
+                await expect(
+                    page.get_by_role("button", name="Start speaking", exact=False)
+                ).to_be_enabled(timeout=20000)
+                await page.wait_for_function(
+                    "document.querySelector('audio').currentTime > 0", timeout=10000
+                )
+
+            await asyncio.gather(start(0, system), start(1, other_system))
+            await asyncio.gather(
+                *(
+                    page.get_by_role("button", name="Start speaking", exact=False).click()
+                    for page in pages
+                )
+            )
+            await asyncio.sleep(0.3)
+            await asyncio.gather(
+                *(
+                    page.get_by_role("button", name="Stop speaking", exact=False).click()
+                    for page in pages
+                )
+            )
+            for page in pages:
+                await expect(page.locator(".score-display strong")).to_have_text(
+                    "10", timeout=20000
+                )
+                await expect(page.get_by_role("log", name="Durable transcript")).to_contain_text(
+                    "How many years", timeout=20000
+                )
+            # Closing one peer/call must leave the other call usable.
+            await pages[0].get_by_role("button", name="End call", exact=True).click()
+            await expect(
+                pages[1].get_by_role("button", name="Start speaking", exact=False)
+            ).to_be_enabled()
+            await pages[1].get_by_role("button", name="Reconnect", exact=True).click()
+            await expect(
+                pages[1].get_by_role("button", name="Start speaking", exact=False)
+            ).to_be_enabled(timeout=20000)
+            await pages[1].get_by_role("button", name="End call", exact=True).click()
+        finally:
+            await browser.close()
+    for s in (system, other_system):
+        async with s.sessions() as db:
+            messages = list(
+                await db.scalars(
+                    select(Message)
+                    .where(Message.conversation_id == s.conversation_id)
+                    .order_by(Message.sequence_number)
+                )
+            )
+            assert [m.speaker for m in messages] == ["AGENT", "USER", "AGENT"]
+            assert all(m.call_id == s.call_id for m in messages)
+            assert (
+                await db.scalar(
+                    select(func.count())
+                    .select_from(LeadScoreHistory)
+                    .where(LeadScoreHistory.lead_id == s.lead_id)
+                )
+                == 1
+            )
+            call = await db.get(Call, s.call_id)
+            assert call is not None and call.status == "ENDED"
+            assert call.reconnect_attempts == (0 if s is system else 1)

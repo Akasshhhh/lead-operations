@@ -66,6 +66,12 @@ services:
       LEAD_SERVICE_AUTH_TOKEN: ${LEAD_SERVICE_AUTH_TOKEN:-local-lead-service-token}
     expose:
       - "8001"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, urllib.request; urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8001/health', headers={'X-Service-Token': os.environ['LEAD_SERVICE_AUTH_TOKEN']}), timeout=3).close()"]
+      interval: 5s
+      timeout: 5s
+      start_period: 10s
+      retries: 6
     depends_on:
       db-migrate:
         condition: service_completed_successfully
@@ -88,9 +94,15 @@ services:
       CONVERSATION_SERVICE_TIMEOUT_SECONDS: ${CONVERSATION_SERVICE_TIMEOUT_SECONDS:-5}
     expose:
       - "8002"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, urllib.request; urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8002/health', headers={'X-Service-Token': os.environ['LEAD_SERVICE_AUTH_TOKEN']}), timeout=3).close()"]
+      interval: 5s
+      timeout: 5s
+      start_period: 10s
+      retries: 6
     depends_on:
       lead-service:
-        condition: service_started
+        condition: service_healthy
     networks:
       - voice_ai
 
@@ -157,11 +169,17 @@ services:
       DEMO_FAULTS_ENABLED: ${DEMO_FAULTS_ENABLED:-0}
     ports:
       - "${API_GATEWAY_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).close()"]
+      interval: 5s
+      timeout: 5s
+      start_period: 30s
+      retries: 6
     depends_on:
       lead-service:
-        condition: service_started
+        condition: service_healthy
       conversation-service:
-        condition: service_started
+        condition: service_healthy
     networks:
       - voice_ai
 
@@ -173,9 +191,15 @@ services:
       GATEWAY_URL: http://api-gateway:8000
     ports:
       - "${DASHBOARD_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      start_period: 10s
+      retries: 6
     depends_on:
       api-gateway:
-        condition: service_started
+        condition: service_healthy
     networks:
       - voice_ai
 

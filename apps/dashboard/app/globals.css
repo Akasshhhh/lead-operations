@@ -909,6 +909,10 @@ audio {
   font-size: 9px;
   white-space: nowrap;
 }
+.future code {
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
 .diagnostics {
   flex-direction: column;
   align-items: stretch;

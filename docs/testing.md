@@ -192,7 +192,7 @@ Ruff format/lint, strict mypy (**79 files**), `pip check`, and Compose configura
 validation passed. This library-only module changes no deployed service or
 migration; the six rebuilt Compose tests remain the historical Modules 1–7
 deployment evidence and were not rerun for Module 8. Interfaces, limitations,
-and deferred work are documented in [`module-8.md`](module-8.md).
+and deferred work are documented in [`module-8.md`](implementation-plan.md).
 
 The project wheel built successfully with the declared setuptools backend in an
 isolated temporary build environment. Importing `voice_platform_llm` directly
@@ -227,7 +227,7 @@ Compose configuration, and Git whitespace checks passed. Existing service,
 migration, and business contracts were preserved. The six rebuilt Compose tests
 remain historical Modules 1–7 deployment evidence. The optional Module 9 wheel
 rebuild was declined and remains unverified; Module 8's wheel result above is
-historical. See [`module-9.md`](module-9.md) for contracts and deferred integration.
+historical. See [`module-9.md`](implementation-plan.md) for contracts and deferred integration.
 
 ## Module 10 verification — 2026-10-04
 

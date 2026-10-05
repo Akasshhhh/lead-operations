@@ -8,15 +8,16 @@ domain services so the voice runtime stays thin.
 
 ## ADR-002: Redis Streams initially
 
-Redis is already required for short-lived runtime state, locks, health state,
-and cache. Redis Streams provide consumer groups, replay within retention, and
+Redis Streams provide asynchronous event delivery, consumer groups, replay within
+retention, and
 simple local operations. An `EventBus` abstraction keeps Kafka as a future
 option if throughput or replay requirements change.
 
 ## ADR-003: PostgreSQL as durable source of truth
 
 PostgreSQL owns business state, transcripts, event outbox records, and
-persisted evaluation results when used. Redis is never the authoritative store.
+workflow actions. The evaluation schema is retained as a foundation; current
+evaluation artifacts are local JSON reports. Redis is never the authoritative store.
 
 ## ADR-004: Provider routers inside Voice Runtime initially
 
@@ -125,7 +126,7 @@ proposals. The runtime validates tool names/IDs, bounds, finish consistency, EOF
 and a total generation deadline. Partial events remain provisional until validated
 completion; tool execution and authoritative domain validation are Module 13.
 Cancellation propagates and closes request-owned provider resources. Real
-providers, routing, and retries are Module 9. See [`module-8.md`](module-8.md).
+providers, routing, and retries are Module 9. See [`module-8.md`](implementation-plan.md).
 
 ## ADR-012: OpenAI/OpenRouter adapters and safe partial-output recovery
 
@@ -144,7 +145,7 @@ Circuit state and capability selection live in the runtime process. Half-open
 probes are exclusive; epoch guards protect recovery from stale in-flight results.
 Cancellation releases request resources and probe admission without a failure
 count. The existing provider-health table and domain services remain unchanged.
-Configuration, verification limits, and later integration: [`module-9.md`](module-9.md).
+Configuration, verification limits, and later integration: [`module-9.md`](implementation-plan.md).
 
 ## ADR-013: Speech contracts preserve domain ownership and explicit audio formats
 
@@ -180,3 +181,33 @@ input read is unsafe to resume and fails rather than silently truncate. Provider
 health/circuits remain process-local with exclusive probes and epoch guards;
 domain state is unaffected. Pipecat/playback/VAD and durable call/transcript
 integration remain Module 12. Details: [`module-11.md`](module-11.md).
+
+## ADR-015: Durable domain boundaries before media effects
+
+Modules 12–14 preserve Lead scoring ownership and Conversation persistence. User
+input is staged durably; validated confirmed tool facts are frozen before Lead
+application. Agent messages persist idempotently before TTS. Ambiguous failures
+recover using the same identities, without replaying exposed audio or fabricating
+scores. Workflow intent and acknowledgement recovery live in Conversation, not a
+new service. The state graphs and schema remain unchanged.
+
+## ADR-016: Session diagnostics and repository evaluation
+
+Modules 15–17 expose safe operational metadata through the existing Gateway and
+same-origin dashboard proxy. Provider/circuit/fault state stays process-local;
+PostgreSQL remains business truth. Capability-protected, opt-in local faults
+exercise existing failures without changing domain decisions. Evaluation runs
+selected deterministic regression scenarios and emits bounded content-free JSON;
+skips/errors fail the gate. It does not claim paid-provider quality or implement
+live-call scoring in the foundational evaluation tables.
+
+## ADR-017: Readiness and least-privilege local containers
+
+Module 18 uses existing authenticated health contracts for startup readiness and
+runs Python images/migrations as a dedicated UID 10001. Dashboard remains `node`.
+Readiness is scoped: domain DB access, Gateway Lead access, dashboard page serving.
+No new distributed health state or automatic outage controller is introduced.
+A scripted Chrome demo reuses the verified product scenario. Isolated fresh
+Compose volumes verify clean startup and destructive recovery tests without
+resetting operator data. Production identity and paid/media smoke tests remain
+explicitly outside these verification claims.

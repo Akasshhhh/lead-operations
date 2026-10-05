@@ -1748,15 +1748,17 @@ export default function Dashboard() {
                     ))}
                   </details>
                 </section>
-                <section className="card future">
+                <section className="card future diagnostics">
                   <div>
                     <h2>Evaluation</h2>
                     <p>
-                      Repeatable scenario results will be connected in Module
-                      17.
+                      Repeatable synthetic scenarios verify qualification,
+                      scoring, provider failover, recovery and concurrent calls.
+                      Run the repository evaluation command to generate a
+                      report.
                     </p>
                   </div>
-                  <button disabled>Available in Module 17</button>
+                  <code>make evaluate EVALUATION_SUITE=all</code>
                 </section>
               </div>
               {activity.length > 0 && (

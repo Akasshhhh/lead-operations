@@ -1,4 +1,4 @@
-# Reliability — implemented boundaries through Module 11
+# Reliability — implemented boundaries through Module 18
 
 ## Speech library boundary
 
@@ -9,7 +9,8 @@ and consumer pauses. Timeout, cancellation and early close release owned input
 and output streams; terminal success is exposed only after EOF and closure.
 Partial text/audio is not replayed. No persistence or call/scoring state changes
 occur here. Module 11 adds real adapters and recovery below. Transport,
-playback-buffer interruption and durable transcript mapping remain Module 12.
+playback-buffer interruption and durable transcript mapping are implemented in
+Module 12; see the current plan for complete runtime recovery semantics.
 See [`module-10.md`](module-10.md).
 
 ## Speech provider recovery
@@ -141,4 +142,19 @@ original deadline and are validated through the Module 8 runtime adapter.
 Health is process-local operational memory, not durable business truth. Live
 vendor generation and vendor billing cancellation were not verified by fixture
 tests. The existing Conversation/Lead idempotency and durable-before-processing
-requirements remain. See [`module-9.md`](module-9.md) for exact limits.
+requirements remain. See [`module-9.md`](implementation-plan.md) for exact limits.
+
+## Modules 12–18 operational boundary
+
+Durable staged input/frozen facts recover by original turn identity. Agent output
+persists before TTS; media reconnect/recovery does not replay old replies. Provider
+health, admission/capabilities and fault controls are process-local. A Gateway
+restart loses this operational memory while domain history remains durable.
+
+Compose startup waits on authenticated domain database readiness, then Gateway
+Lead readiness and dashboard page delivery. These probes do not attest to media,
+provider quality or event progress, and unhealthy status alone does not restart
+apps. Inspect outbox/stream progress separately. Python images and migrations run
+as UID 10001; dashboard runs as node. The full isolated failure gate and recovery
+runbook are maintained in implementation-plan.md. Paid-provider microphone and
+Docker audio smoke remain pending.

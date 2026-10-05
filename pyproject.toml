@@ -106,6 +106,7 @@ files = [
     "apps/api-gateway/src",
     "workers",
     "tests",
+    "scripts",
 ]
 mypy_path = [
     "packages/voice-runtime",

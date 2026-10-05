@@ -270,7 +270,7 @@ test("microphone denial is explicit and does not create a replacement conversati
   expect(control.calls).toBe(0);
 });
 
-test("mobile layout stays usable and later-module controls are unavailable", async ({
+test("mobile layout shows evaluation command and gates unavailable fault controls", async ({
   page,
 }) => {
   await mockDashboard(page);
@@ -281,8 +281,8 @@ test("mobile layout stays usable and later-module controls are unavailable", asy
   ).toBeVisible();
   await expect(page.getByRole("button", { name: "Arm fault" })).toBeDisabled();
   await expect(
-    page.getByRole("button", { name: "Available in Module 17" }),
-  ).toBeDisabled();
+    page.getByText("make evaluate EVALUATION_SUITE=all"),
+  ).toBeVisible();
   expect(
     await page.evaluate(
       () => document.documentElement.scrollWidth <= window.innerWidth,

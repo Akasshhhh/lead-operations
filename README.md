@@ -7,89 +7,34 @@ integration, failure, and documentation gates before the next module begins.
 
 ## Current status
 
-**Modules 1–15 — Backend, browser voice, live qualification, workflows, and central dashboard**
+Modules 1–18 are implemented. Module 18 adds final hardening, verification, and
+an operational/demo runbook. Final gates: 590 Python regressions, 12 isolated
+Compose checks, 83 evaluation cases, the Chrome demo and 7 frontend browser
+checks passed. Current contracts and evidence are in
+[implementation-plan.md](docs/implementation-plan.md); the local ignored
+`docs/PROJECT_HANDOFF.md` preserves engineering context.
 
-The central Next.js dashboard is implemented: synthetic lead selection/creation,
-start/resume voice calls, live transcripts, authoritative qualification/scoring,
-call history, handoff/follow-up controls, session-local provider health, and safe
-conversation event metadata. It keeps durable history/call state readable during
-Lead outages and shows qualification as unavailable rather than substituting a
-cached score. Failure simulation and evaluation controls are reserved for Modules
-16/17. Latest contracts, verification and limits:
-[`docs/implementation-plan.md`](docs/implementation-plan.md).
+The dashboard provides leads, voice calls, transcripts, live qualification and
+score history, handoff/follow-up, safe event metadata, provider health, and opt-in
+failure simulation. Evaluation is a repository command with a content-free JSON
+report. Modules 1–7 establish persistence, service boundaries, event delivery,
+conversation recovery and retention; 8–11 provide LLM/speech adapters and routers;
+12–14 add Pipecat, qualification tools and workflows; 15–17 add the dashboard,
+observability/fault controls and repeatable evaluation.
 
-Latest gates: **556 Python regressions passed** (one expected deployment skip),
-**7 frontend browser tests**, and **6 rebuilt Compose deployment tests**. Paid
-providers are optional; defaults remain fixture transcripts/tones rather than real
-recognition/synthesis. The historical module results below describe earlier gates.
+Lead owns confirmed qualification and authoritative baseline-v1 scoring.
+Conversation owns durable turns/messages, calls and workflows. Gateway hosts the
+Pipecat media runtime. PostgreSQL owns business truth; Redis Streams deliver
+outbox events at least once. Provider circuits, media sessions and fault controls
+are process-local. One active conversation per lead, one active call and one
+pending turn per conversation remain intentional. Retry with the original
+identity recovers ambiguous durable effects; exposed output is never replayed.
 
-The current implementation establishes the Python/Node version conventions,
-shared configuration validation, PostgreSQL persistence, deterministic leads,
-the Lead Service, the public API Gateway, an independent Redis Streams outbox
-relay with retry/deduplication/dead-letter support, and the Conversation Service
-with live turn ingestion and durable call sessions.
-Module 7 adds paginated history, transcript search, and explicit terminal-content
-retention redaction.
-Module 8 adds vendor-independent LLM contracts, a stateless streaming runtime/test
-adapter, and a deterministic mock. Interface and local-use documentation:
-[`docs/module-8.md`](docs/module-8.md). Its verification passed **181 tests** with
-real PostgreSQL/Redis and one expected opt-in Compose skip, including 38 new LLM
-contract, streaming/tool, timeout, cancellation, and failure tests.
-
-Module 9 adds OpenAI and OpenRouter (Llama 3.3 by default), bounded retries,
-capability-aware routing, circuit recovery, and safe handling of partial output.
-Configuration, deterministic adapter tests, and limitations:
-[`docs/module-9.md`](docs/module-9.md). Real credentials are optional; local mock
-mode remains the default. Verification passed **261 regression tests** with real
-PostgreSQL/Redis and one expected Compose skip, including 80 new provider/router
-tests. Live paid API calls were not run.
-
-Module 10 adds vendor-independent streaming STT/TTS contracts, validated speech
-runtime adapters, cancellation/deadline handling, and deterministic text/PCM
-fixtures. Local examples and provider preferences:
-[`docs/module-10.md`](docs/module-10.md). Verification passed **75 new speech tests**
-and **336 full regression tests**, with one expected Compose skip. Real speech
-providers are added by Module 11 below.
-
-Module 11 adds Sarvam realtime STT, Sarvam/Rumik PCM TTS, capability-aware
-selection, bounded retries, circuit recovery and safe failover. Verification:
-**88 new tests**, **424 full regression tests**, one expected Compose skip.
-Mock mode remains the default; live vendor calls were not run. Configuration,
-provider limits and deferred integration: [`docs/module-11.md`](docs/module-11.md).
-
-Modules 1–5 have undergone an expanded correctness and failure-path audit.
-Findings, fixes, and verification evidence: [`docs/modules-1-5-audit.md`](docs/modules-1-5-audit.md).
-Module 6 ownership, state graphs, scoring baseline, live-turn recovery, and
-verification are documented in [`docs/module-6.md`](docs/module-6.md).
-Module 7 retrieval and retention behavior is documented in
-[`docs/module-7.md`](docs/module-7.md).
-
-Final Modules 1–7 verification passed **143 real-dependency regression tests** and
-**6 rebuilt Compose deployment tests**. Lead outages preserve pending transcript
-input and return 503 without local/stale scoring; identical retries recover
-partial success without duplicate effects. Detailed findings and recovery:
-[`docs/modules-1-7-verification.md`](docs/modules-1-7-verification.md).
-
-## Remaining product roadmap
-
-The approved reduced plan runs from **Modules 8–18**:
-
-| Modules | Deliverable |
-|---|---|
-| 8–9 | LLM contracts, deterministic mocks, providers A/B, and failover router |
-| 10–11 | Streaming STT/TTS contracts, voice providers A/B, and router |
-| 12 | Pipecat browser/WebRTC voice runtime and interruption/call integration |
-| 13 | AI tools, dynamic qualification, and live Lead-authoritative scoring |
-| 14 | Lightweight safety, durable handoff, and follow-up |
-| 15 | One central dashboard and live call interface |
-| 16 | Useful observability and demo failure controls |
-| 17 | Realistic evaluation, voice E2E, failure recovery, and basic concurrency |
-| 18 | Final regression/hardening, configuration, documentation, and demo runbook |
-
-Next is **Module 16 — Useful observability and failure simulation**, currently unstarted. Each module
-begins with inspection and a conflict-stop gate and ends with relevant tests and
-documentation. Exact scope/gates and deferred infrastructure are in
-[`docs/implementation-plan.md`](docs/implementation-plan.md).
+Default speech uses fixture `Hello` transcripts and tones, and the mock LLM
+supplies no qualification facts. Scripted providers verify scoring/workflows in
+the demo below. Host Chrome/WebRTC is verified; paid-provider human microphone
+and Docker UDP/NAT audio still need a live smoke test. Public/operator production
+authentication and workload identity remain deferred; this is a local demo stack.
 
 ## Prerequisites
 
@@ -106,7 +51,7 @@ Run the full mock stack and open **http://localhost:3000**:
 ```bash
 POSTGRES_PORT=55432 REDIS_PORT=56379 API_GATEWAY_PORT=18000 DASHBOARD_PORT=3000 \
 VOICE_RUNTIME_ENABLED=1 LLM_MODE=mock SPEECH_MODE=mock \
-  docker compose up -d --build --wait
+  docker compose up -d --build --wait --wait-timeout 180
 docker compose exec lead-service python -m lead_service.seed
 ```
 
@@ -148,7 +93,7 @@ make install
 make infra-up
 DATABASE_URL='postgresql+asyncpg://voice_ai:voice_ai_dev_password@localhost:5432/voice_ai' make db-upgrade
 DATABASE_URL='postgresql+asyncpg://voice_ai:voice_ai_dev_password@localhost:5432/voice_ai' make seed-leads
-make check
+make format-check lint typecheck infra-validate
 ```
 
 Application code does not load `.env` implicitly. Compose reads it for variable
@@ -215,3 +160,77 @@ The approved architecture and incremental implementation plan are documented in:
 - `docs/architecture.md`
 - `docs/implementation-plan.md`
 - `docs/decisions.md`
+
+## Readiness and recovery
+
+Python services, the relay, and migrations run as UID 10001; dashboard runs as
+`node`. Compose waits for authenticated domain health before starting dependent
+apps. Lead/Conversation probes verify PostgreSQL access, Gateway probes Lead
+readiness, and dashboard probes page delivery. They do not prove providers,
+Redis delivery, or media readiness. Unhealthy status does not automatically
+restart a container. Use `docker compose ps`, service logs, and
+`docker compose exec -T event-relay python -m event_relay inspect` together.
+
+Use the same port/voice settings on later Compose commands, preferably saved in
+`.env`. `docker compose down` preserves data. Do not remove needed volumes.
+Named volumes/network are shared across project names unless overridden; the
+isolated clean-start/failure recipe is in the Module 18 runbook in the plan.
+
+## Provider modes
+
+Keys are server-only; never use browser environment variables for credentials.
+Supply a key for every enabled provider. `.env.example` documents models, voices,
+deadlines, retries and circuits. No automatic real-to-mock fallback exists.
+
+| Configuration | Required keys |
+|---|---|
+| `LLM_MODE=mock`, `SPEECH_MODE=mock` | None |
+| `LLM_MODE=real`, `LLM_PROVIDERS=openai,openrouter` | `OPENAI_API_KEY`, `OPENROUTER_API_KEY` |
+| `SPEECH_MODE=real`, `STT_PROVIDERS=sarvam`, `TTS_PROVIDERS=sarvam,rumik` | `SARVAM_API_KEY`, `RUMIK_API_KEY` |
+
+A restricted list such as `TTS_PROVIDERS=sarvam` needs only that path's key.
+OpenAI Realtime TTS is deferred pending compatibility with the separate LLM-to-TTS
+boundary. Live vendor quality/acceptance remains unverified.
+`DEMO_FAULTS_ENABLED=1` enables session-capability-protected controls only in
+local/test environments; it is off by default and cannot modify business truth.
+
+## Repeatable evaluation and Chrome demo
+
+Use a **separate disposable database**: regression tests exercise migration
+rebuilds, outages and retention. Do not point them at your demo database.
+
+```bash
+.venv/bin/python -m pip install -e '.[dev,voice]'
+npm ci
+npm run dashboard:build
+docker compose exec -T postgres createdb -U voice_ai voice_ai_test
+DATABASE_URL=postgresql+asyncpg://voice_ai:voice_ai_dev_password@localhost:55432/voice_ai_test make db-upgrade
+export TEST_DATABASE_URL=postgresql+asyncpg://voice_ai:voice_ai_dev_password@localhost:55432/voice_ai_test
+export TEST_REDIS_URL=redis://localhost:56379/15
+make evaluate                       # deterministic core scenarios
+make demo                           # Chrome voice/score/reconnect/handoff scenario
+.venv/bin/python -m scripts.demo --report test-results/demo.json --screenshot test-results/demo.png
+```
+
+The demo launches a production Next.js build and host Gateway/domain fixtures
+with real PostgreSQL and headless Chrome. It verifies audio, score, lost-offer
+retry, reconnect, durable handoff, operator completion and reload, then cleans
+its synthetic records. It does not target the Compose dashboard or paid APIs.
+Missing prerequisites/skips/errors fail explicitly. JSON reports contain safe
+statuses, timings and Git state, without transcripts, captures or exception text.
+Concurrent writers publish complete documents atomically; the last finishing
+writer wins. Use different report paths to retain separate runs.
+
+Set `CHROME_EXECUTABLE` outside the default macOS Chrome location;
+`DASHBOARD_NODE` can select Node 22. For the full evaluation preset:
+
+```bash
+export VOICE_TEST_WAV=/absolute/path/to/speech-fixture.wav
+make evaluate EVALUATION_SUITE=all
+```
+
+The WAV must contain speech for automatic VAD; silence/tones do not satisfy the
+check. Full-regression/deployment commands, recovery steps and current evidence
+are in the [Module 18 runbook](docs/implementation-plan.md). Pytest without
+backend/browser opt-ins can skip integration checks and is not the full gate.
+Frontend browser checks: `npm run dashboard:test`.

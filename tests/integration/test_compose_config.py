@@ -28,7 +28,7 @@ def test_compose_passes_custom_database_credentials_to_every_database_client() -
         timeout=30,
     )
     services = json.loads(result.stdout)["services"]
-    for name in ("postgres", "db-migrate", "lead-service", "event-relay"):
+    for name in ("postgres", "db-migrate", "lead-service", "conversation-service", "event-relay"):
         env = services[name]["environment"]
         # `compose config` escapes dollars so its output can be re-used as YAML.
         env = {key: value.replace("$$", "$") for key, value in env.items()}
@@ -40,3 +40,31 @@ def test_compose_passes_custom_database_credentials_to_every_database_client() -
             assert url.password == credentials["POSTGRES_PASSWORD"]
             assert url.database == credentials["POSTGRES_DB"]
             assert url.host == "postgres" and url.port == 5432
+
+
+@pytest.mark.integration
+def test_compose_readiness_waits_for_authenticated_domain_health_without_exposing_token() -> None:
+    if not shutil.which("docker"):
+        pytest.skip("Docker Compose required")
+    token = "private-health-token"
+    result = subprocess.run(
+        ["docker", "compose", "config", "--format", "json"],
+        env=os.environ | {"LEAD_SERVICE_AUTH_TOKEN": token},
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    services = json.loads(result.stdout)["services"]
+    for name in ("lead-service", "conversation-service", "api-gateway", "dashboard"):
+        probe = " ".join(services[name]["healthcheck"]["test"])
+        assert token not in probe
+        if name.endswith("service"):
+            assert "X-Service-Token" in probe and "LEAD_SERVICE_AUTH_TOKEN" in probe
+    for downstream, upstream in (
+        ("conversation-service", "lead-service"),
+        ("api-gateway", "lead-service"),
+        ("api-gateway", "conversation-service"),
+        ("dashboard", "api-gateway"),
+    ):
+        assert services[downstream]["depends_on"][upstream]["condition"] == "service_healthy"

@@ -15,9 +15,10 @@ current module; advance after its verification and documentation gates pass.
 The remaining roadmap replaces the original 32-module plan. The goal is one
 demonstrable browser voice qualification product with provider failover, live
 Lead-owned qualification/scoring, and one central dashboard. Modules 1–7 are
-implemented and reverified; Modules 8–16 are implemented and verified below.
-Modules 17–18 remain planned. Module 15 is committed as `3d6eab1` on top of
-`4ce9107`; Module 16 changes are uncommitted.
+implemented and reverified; Modules 8–18 are implemented and verified below.
+Module 15 is committed as `3d6eab1` on top of `4ce9107`, Module 16 as `0b1842b`;
+Modules 17–18 changes are uncommitted. The approved roadmap is complete within
+the documented fixture/live-smoke limits; additional scope requires approval.
 
 1. Repository and development infrastructure
 2. PostgreSQL, migrations, and base domain models
@@ -368,7 +369,8 @@ No existing services, APIs, models, migrations, scoring, or state graphs change.
 - [x] Modules 1–7 real PostgreSQL/Redis regressions: 181 passed, one opt-in Compose skip
 - [x] Ruff lint/format, strict mypy (79 files), dependency and Compose checks
 - [x] Project wheel build plus import/mock-generation smoke check from the wheel
-- [x] Interface/ownership/local-use documentation in [`module-8.md`](module-8.md)
+- [x] Interface/ownership/local-use documentation (historical `module-8.md` is
+  absent from the current checkout; current contracts and limits are recorded here).
 
 Real adapters, routers, health, retries, circuit breakers, and failover are
 Module 9. Tool execution, domain validation, and runtime/service integration
@@ -389,7 +391,8 @@ provider preference order are configurable. Mock mode remains credential-free.
 - [x] Configuration/key validation and explicit mock/real modes
 - [x] 80 new adapter/router/configuration tests; 118 combined LLM tests passed
 - [x] Full PostgreSQL/Redis regression and migration gates: 261 passed, one expected opt-in Compose skip
-- [x] Interface/configuration/recovery documentation in [`module-9.md`](module-9.md)
+- [x] Interface/configuration/recovery documentation (historical `module-9.md` is
+  absent from the current checkout; current configuration/recovery is recorded here).
 
 Provider integration verification uses HTTPX with deterministic vendor-format
 fixtures. Live paid vendor calls were not run. The optional wheel rebuild was
@@ -1493,5 +1496,334 @@ No new migration; head remains `e8f2a6b3c901`. Paid-provider human microphone
 quality/latency and Docker-to-browser UDP/NAT audio still require a live smoke
 test; fixture success does not establish those claims.
 
-Stop after Module 16. Next is **Module 17 — Evaluation and end-to-end testing**,
-requiring separate authorization. No evaluation harness or Module 17 scope added.
+Module 16 was subsequently committed as `0b1842b`. The user then authorized the
+next module; Module 17 is recorded below. No Module 18 implementation is included.
+
+## Module 17 — repeatable evaluation, voice E2E and basic concurrency
+
+Inspected both main documents completely, historical verification, current
+contracts/models/state graphs/runtime/tests and clean Git state at `0b1842b`.
+No material architectural conflict. Existing scoring and qualification authority,
+staged/user/agent/workflow contracts, persistence, migrations and state machines
+are unchanged. This module organizes and extends the existing verification path.
+
+### Evaluation command and report
+
+`python -m scripts.evaluate --suite core|voice|all --report PATH` runs fixed pytest
+presets from the repository root. `make evaluate` defaults to core;
+`make evaluate EVALUATION_SUITE=all` includes media/browser verification. Install
+the existing dev/voice/browser-test dependencies; no new package/service is added.
+The command explicitly selects local deterministic provider modes. It enables
+the existing browser opt-ins for voice/all, and clears inherited `PYTEST_ADDOPTS`
+filters so an accidental `-k/-m/--lf` cannot silently narrow the preset.
+
+Core covers multi-turn callers, staged qualification/score/next-question/replay,
+workflow policies/recovery, dependency fault reset, LLM adapter failover/context
+and TTS adapter failover/no partial replay. Voice covers production Next dashboard
+with actual Gateway/domain/PostgreSQL, WebRTC audio/reconnect, both Chrome PTT/VAD
+modes, fault recovery and two simultaneous dashboard calls. These are deterministic
+integration assertions, not a semantic or speech-quality judge.
+
+Default report is `test-results/evaluation.json`, under the already ignored test
+artifact directory. JSON format v1 includes suite, revision, dirty-worktree flag,
+UTC start/end, duration, provider mode/scope, gate status, pytest exit code,
+collection errors, counts and each collected case's status/duration. Parameter
+labels are hashed because pytest IDs can contain fixture text. Reports exclude
+capture, tracebacks, exceptions, transcripts/audio, credentials, environment values
+and assertions' input data. Normal pytest console output retains its diagnostic
+behavior; the JSON is the content-free shareable result. Replacement is atomic.
+
+Exit 0 requires a nonempty collected set with every case passing, no collection
+errors and pytest exit 0. Any skip/xfail/not-run, fixture error, failure, interruption
+or collection error makes the gate `failed_or_incomplete` and exit 1. Missing DB
+or browser prerequisites cannot count as verified integration. `core`/`voice` are
+explicit partial presets; only `all` is the complete Module 17 evaluation preset.
+This command does not provision infrastructure, migrate/drop DBs or stop containers.
+
+The existing central dashboard replaces its disabled Module 17 placeholder with
+the available operator command. Evaluation remains a repository CLI/JSON artifact;
+the browser does not launch pytest or publish reports. Foundational evaluation
+tables remain reserved, with no competing evaluation store/service, new schema,
+post-call worker or live-call grading introduced.
+
+### Added coverage
+
+- Multi-turn education provisional → confirmed → contradictory → explicit
+  resolution asserts scores 0/10/0/10, answer statuses and backend questions.
+- Urgent caller with false budget/job-offer and zero experience asserts scores
+  10/20/30/40, preserved values and urgency-aware questions. Each turn exercises
+  primary LLM failure/secondary execution in QualifiedDialogue, then simultaneous
+  stale-admission/apply retries. Exact messages/transcripts, contiguous sequence,
+  score history and unique outbox effects prove no duplicates.
+- Two real-DB runtime sessions process concurrently: an injected apply timeout
+  leaves one bound PENDING turn while the other completes. Fresh runtime recovery
+  finishes the first once without old audio/reply; lead values/scores/call scope
+  stay independent.
+- Two production-dashboard Chrome peers call concurrently through one Gateway.
+  Both receive audio and produce separate durable transcript/score effects. Ending
+  one preserves the second's readiness/reconnect. Exact call/message/history
+  assertions confirm isolation; this is a two-call check, not a load benchmark.
+- Actual subprocess pytest report tests cover pass, skip, assertion/setup/teardown/
+  collection failures, hashed fixture IDs, and the CLI missing-DB/inherited-filter
+  guard. Frontend verification checks the command and mobile layout.
+
+### Reproduction and verification
+
+Create/migrate a dedicated DB first (as in `docs/testing.md`); keep it separate
+from the demo database. Build the production dashboard using Node 22. Example:
+
+```bash
+npm run dashboard:build
+TEST_DATABASE_URL=postgresql+asyncpg://voice_ai:voice_ai_dev_password@localhost:55432/module17_test \
+DASHBOARD_NODE=/absolute/path/to/node22 \
+CHROME_EXECUTABLE='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' \
+VOICE_TEST_WAV=/absolute/path/to/synthetic-speech.wav \
+  .venv/bin/python -m scripts.evaluate --suite all --report test-results/evaluation.json
+```
+
+Core verification passed **75 cases with no skips**; complete evaluation passed
+**83 cases with no skips**. **7 frontend Playwright tests passed**. Ruff checks
+(**150 files**), strict mypy including scripts/Alembic (**132 source files**),
+TypeScript/Prettier, production build, dependency and Compose/whitespace checks
+passed. Full regression passed **586 tests** with one separate deployment-only
+skip. The **8-case report suite** passed separately after adding the final CLI
+missing-DB/inherited-filter guard (seven of these cases were already included in
+the full run). Existing Pipecat audioop/importlib deprecation warnings remain.
+**6 deployment tests passed** against the rebuilt dashboard and existing verified
+voice-enabled application images, including production Next proxy/Chrome reads
+and real Redis/relay/PostgreSQL/Lead outage recovery. Deployed Alembic reports no
+drift. Final exact-type assertions for scenario values also passed in the focused
+three-case integration rerun. Restored Gateway health is 200; unpublished/exhausted
+outbox and dead-letter counts are zero. The disposable `module17_test` was removed;
+the mock dashboard remains on 3000/Gateway on 18000 with demo faults enabled.
+Reports retained locally: `test-results/module17-core.json` and
+`test-results/module17-all.json` (75 and 83 passed, no skips); both record the
+uncommitted working tree on top of `0b1842b` and remain ignored artifacts.
+
+No migration; head remains `e8f2a6b3c901`. Paid-provider human microphone semantic/
+voice quality and latency, Docker browser-to-runtime UDP/NAT audio and broad load
+testing remain unverified. Host synthetic Chrome/WebRTC proves transport/control
+and backend behavior, not recognition or pronunciation quality. The CLI report
+is local test evidence, not a durable grade of an arbitrary live conversation.
+
+Stop after Module 17. Next is **Module 18 — Final hardening / demo runbook**,
+requiring separate authorization after the module report.
+
+
+## Module 18 — final hardening and operational/demo runbook
+
+Inspection started from `0b1842b` plus the completed, uncommitted Module 17 work.
+The actual repository matched the latest handoff contracts; README/architecture
+status text was stale. No material architectural conflict was found. Module 17
+was preserved rather than repeated. Module 18 changes no domain schema, graph,
+score ownership, provider behavior, or service boundary.
+
+### Implemented hardening
+
+Python application, relay and migration images run as dedicated UID/GID 10001
+with a writable home, while installed code stays root-owned/readable. Dashboard
+remains `node`. Compose startup waits for authenticated Lead/Conversation health,
+then Gateway and dashboard health. Domain probes read the service token from the
+container environment, never embed its value in the probe command/output.
+
+Health scopes are deliberately precise: Lead and Conversation probe PostgreSQL;
+Gateway probes Lead/DB readiness; dashboard probes page serving. Conversation
+health does not depend on Lead, preserving history access during its outage.
+Relay has no synthetic health endpoint: inspect its backlog, stream/group state,
+and dependency logs to distinguish an alive process from delivery progress.
+Docker unhealthy status does not restart applications automatically.
+
+The evaluation writer now uses unique temporary files in the destination
+folder before atomic replacement. Concurrent writers cannot remove each other's
+temporary file; last completed replacement wins. A synchronized concurrency
+case verifies complete reports and temporary cleanup.
+
+`make demo` / `python -m scripts.demo` reuses the verified production-dashboard
+Chrome scenario, without a new fixture runtime mode or business API. It checks
+WebRTC audio, authoritative score 10, lost-offer retry, reconnect, handoff,
+operator completion and reload through Gateway and domain persistence. It runs
+with deterministic provider fixtures against a disposable database, not paid
+providers or the Compose media path. Missing DB/build/browser prerequisites,
+skips, errors or empty results fail. `--report` selects JSON output;
+`--screenshot` captures the existing browser scenario's scored-call view.
+Reports/screenshots default under ignored `test-results`; screenshots contain
+synthetic fixture content and are not included in content-free JSON reports.
+
+README, architecture, reliability and ADRs now describe the completed boundaries,
+configuration/provider modes, current limitations and operating commands. Existing
+historical missing Module 8/9 doc links point to the main plan. No new per-module
+document was created; PROJECT_HANDOFF remains ignored/untracked.
+
+### Repeatable regression and demo gate
+
+Install Python 3.12 and Node 22 dependencies, optional voice extras, Chrome, and
+build the production frontend as documented in README. Use a disposable migrated
+PostgreSQL database and a dedicated Redis test DB. Integration tests can rebuild
+schema, interrupt connections, and redact fixture rows: never use operator data.
+Keep CLI runs sequential when sharing one test database.
+
+```bash
+export TEST_DATABASE_URL=postgresql+asyncpg://voice_ai:voice_ai_dev_password@localhost:55432/voice_ai_test
+export TEST_REDIS_URL=redis://localhost:56379/15
+export DASHBOARD_NODE=/absolute/path/to/node22
+export CHROME_EXECUTABLE=/absolute/path/to/chrome
+export VOICE_TEST_WAV=/absolute/path/to/speech-fixture.wav
+make format-check lint typecheck infra-validate
+.venv/bin/python -m pip check
+npm run dashboard:check
+npm run dashboard:build
+npm run dashboard:test
+RUN_DASHBOARD_BROWSER_TESTS=1 RUN_BROWSER_VOICE_TESTS=1 \
+  .venv/bin/python -m pytest --ignore=tests/integration/test_event_stack.py \
+    --ignore=tests/integration/test_compose_hardening.py -q
+make evaluate EVALUATION_SUITE=all
+.venv/bin/python -m scripts.demo --report test-results/demo.json --screenshot test-results/demo.png
+```
+
+The full pytest gate has one expected deployment-only skip from
+`test_compose_conversation.py`; that case must pass in the separate deployment
+gate below. The complete evaluation preset must have no skips. Automatic VAD
+needs speech audio in `VOICE_TEST_WAV`; an arbitrary tone WAV is insufficient.
+On this macOS host Node 22 is `/Users/akash/.nvm/versions/node/v22.16.0/bin/node`,
+Chrome is `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`, and the
+speech fixture used for verification is `/private/tmp/module12-speech.wav`.
+That temporary WAV is not a portable repository asset: provide your own speech
+fixture on another machine. The single scripted demo uses its existing generated
+microphone fixture and does not require that external VAD WAV.
+
+### Isolated clean-start and deployment gate
+
+Compose names its network/volumes explicitly. A different `-p` alone does **not**
+isolate data. Use an override and unused host ports; choose unique resource names
+for each audit. This recipe creates disposable audit resources only:
+
+```bash
+cat > /tmp/voice-audit.override.yml <<'YAML'
+networks:
+  voice_ai:
+    name: voice_audit_network
+volumes:
+  postgres_data:
+    name: voice_audit_postgres_data
+  redis_data:
+    name: voice_audit_redis_data
+YAML
+export COMPOSE_PROJECT_NAME=voice-audit
+export COMPOSE_FILE="$PWD/docker-compose.yml:/tmp/voice-audit.override.yml"
+export POSTGRES_PORT=55433 REDIS_PORT=56380 API_GATEWAY_PORT=18001 DASHBOARD_PORT=3002
+export VOICE_RUNTIME_ENABLED=1 LLM_MODE=mock SPEECH_MODE=mock DEMO_FAULTS_ENABLED=1
+# These credentials must match the disposable stack and its test URLs.
+export POSTGRES_USER=voice_ai POSTGRES_DB=voice_ai POSTGRES_PASSWORD=voice_ai_dev_password
+export APP_ENV=local LEAD_SERVICE_AUTH_TOKEN=local-lead-service-token
+ docker compose up -d --build --wait --wait-timeout 180
+ docker compose exec -T lead-service python -m lead_service.seed
+ docker compose exec -T lead-service python -m lead_service.seed
+```
+
+The migration job exits successfully, so `exec db-migrate` is unavailable after
+startup. Inspect its logs and run the head/drift CLI in the live Lead image:
+
+```bash
+docker compose logs db-migrate
+docker compose exec -T lead-service alembic current
+docker compose exec -T lead-service alembic check
+RUN_EVENT_STACK_TESTS=1 RUN_DASHBOARD_BROWSER_TESTS=1 \
+STACK_DATABASE_URL=postgresql+asyncpg://voice_ai:voice_ai_dev_password@localhost:55433/voice_ai \
+STACK_REDIS_URL=redis://localhost:56380/0 STACK_GATEWAY_URL=http://localhost:18001 \
+STACK_DASHBOARD_URL=http://localhost:3002 \
+ .venv/bin/python -m pytest tests/integration/test_event_stack.py \
+ tests/integration/test_compose_conversation.py tests/integration/test_compose_hardening.py -q
+docker compose ps
+docker compose exec -T event-relay python -m event_relay inspect
+```
+
+Expect migration head `e8f2a6b3c901`, no new upgrade operations, seed counts
+21/0 then 0/21 on a fresh DB, healthy HTTP apps, zero unpublished/exhausted
+outbox and no DLQ entries after recovery. Twelve deployment checks verify Redis,
+relay, PostgreSQL and Lead stop/restart, actual dashboard REST integration,
+production token guards, reserved-character credentials, four non-root Python
+identities and both authenticated domain health contracts. They restore stopped
+processes in cleanup. Run only on the isolated stack; they interrupt dependencies.
+
+After retaining needed artifacts, remove **only those disposable resources** with
+`docker compose down --volumes` while the audit project/override variables remain
+set. Then `unset COMPOSE_PROJECT_NAME COMPOSE_FILE` and restore local port/mode
+settings before operating the ordinary stack. Do not run this cleanup against
+existing demo volumes. Drop the dedicated test DB only after all test processes
+exit. Reports/screenshots survive because they are host artifacts.
+
+### Operator recovery and demonstration
+
+1. Start the full mock stack and seed leads. Select a lead, connect a call and
+   inspect transcripts/diagnostics. Fixture speech does not understand natural
+   answers; run the scripted demo for confirmed-fact/scoring/workflow evidence.
+2. With explicit local fault enablement, select a supported session fault in the
+   dashboard. Observe controlled errors, provider attempts and durable input.
+   Reset the fault and recover the original pending turn. Verify no duplicate
+   message, qualification, score event, workflow action or old audio replay.
+3. For a real dependency outage, inspect `docker compose ps`, logs, and relay
+   inspection. Restore PostgreSQL first, then Lead/Conversation, Gateway and
+   dashboard if needed. Use `up -d --wait` with the same configuration; startup
+   health dependencies now refuse admission until ready. History can stay
+   available during a Lead outage; scores must show unavailable.
+4. After Redis/relay recovery, inspect the outbox. Exhausted rows require explicit
+   `docker compose exec -T event-relay python -m event_relay retry-event EVENT_UUID`.
+   For DLQ use the bounded `replay-dlq` CLI documented in the relay README.
+   Retain the original event identity; consumers deduplicate after DB commit.
+5. Reconnect/reload and verify durable history. A Gateway restart loses process
+   diagnostics, capabilities and media; use the existing supported recovery flow,
+   not an assumption of session/circuit persistence or old reply replay.
+6. Run the scripted demo/evaluation and retain JSON/screenshot artifacts with
+   their Git revision/dirty marker. Fixtures demonstrate boundary correctness,
+   not vendor acceptance, speech quality, live-call grading or load capacity.
+
+Known limits remain: one Gateway process, bounded session admission, explicit
+retention/retry operators, local shared-secret service authentication, no public
+production auth/telephony/business integrations. Paid-provider microphone and
+Docker browser UDP/audio reachability need a live smoke test with suitable
+credentials/network. OpenAI Realtime TTS remains deferred. No new roadmap module
+or additional product scope is authorized after Module 18.
+
+
+### Module 18 verification — 2026-10-05
+
+- **590 full Python regressions passed**, one deployment-only skip, eight existing
+  Pipecat/Python deprecation warnings; 591 collected with event-stack/hardening
+  deployment files excluded. The skipped Conversation deployment case passed in
+  the separate gate. This includes migration roundtrip, rebuild, data preservation
+  and drift, dependency recovery, live WebRTC, manual/VAD Chrome, and concurrency.
+- **12 rebuilt isolated Compose deployment checks passed**, with voice-enabled
+  mock/fault configuration and production Next dashboard; six existing outage/
+  integration cases plus four non-root identities and two authenticated health
+  probes. Fresh uniquely named volumes/network on 55433/56380/18001/3002 reached
+  healthy readiness. Two seed runs inserted 21 then 0 leads. Migration head
+  `e8f2a6b3c901`, no new upgrade operations; outbox unpublished/exhausted 0/0 and
+  DLQ 0 after recovery.
+- **83/83 complete evaluation cases passed**, no skips/errors/not-run cases,
+  retained at `test-results/module18-all.json`. **Dedicated demo passed (1/1)**
+  with `test-results/module18-demo.json` and inspected synthetic screenshot
+  `test-results/module18-demo.png`. Reports record revision `0b1842b` and dirty
+  working tree; they are evidence of this uncommitted work, not a later commit.
+- **7 frontend browser checks passed**. TypeScript/Prettier, production dashboard
+  image build, Ruff formatting (**152 files**)/lint, strict mypy (**134 source
+  files**), `pip check`, Compose validation and Git whitespace checks passed.
+- Existing local stack redeployed with non-root images/readiness without replacing
+  volumes; healthy dashboard at 3000, Gateway at 18000, PostgreSQL at 55432 and
+  Redis at 56379. Mock voice/fault modes enabled for local demonstration. The
+  isolated audit stack/volumes and disposable `module18_test` DB are removed after
+  final gates; ignored reports/screenshots retained.
+
+No material architecture conflict or domain schema/behavior change. Module 17's
+completed changes are still present and uncommitted together with Module 18 on
+`0b1842b`; PROJECT_HANDOFF remains ignored/untracked. Paid-provider microphone
+quality/acceptance and Docker browser audio/UDP reachability remain unverified,
+not concealed by fixture successes. No additional module is approved.
+
+For a combined Modules 17–18 commit after reviewing `git diff` and untracked
+source files (the handoff and test artifacts stay ignored):
+
+```bash
+git add Makefile README.md apps docker-compose.yml docs pyproject.toml services workers scripts tests
+git commit -m "feat: complete evaluation and final hardening" \
+  -m "Add deterministic evaluation and Chrome demo gates, authenticated Compose readiness, and non-root Python containers. Verify recovery and concurrency; document current architecture, configuration, runbook, and live-smoke limits."
+```

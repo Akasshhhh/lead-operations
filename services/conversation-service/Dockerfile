@@ -1,4 +1,5 @@
 FROM python:3.12-slim
+RUN groupadd --gid 10001 app && useradd --create-home --uid 10001 --gid app app
 
 WORKDIR /app
 
@@ -18,4 +19,5 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONPATH=/app/packages/configuration:/app/packages/database:/app/packages/contracts:/app/services/conversation-service/src
 
+USER app
 CMD ["uvicorn", "conversation_service.app:app", "--host", "0.0.0.0", "--port", "8002"]
