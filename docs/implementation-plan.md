@@ -15,9 +15,9 @@ current module; advance after its verification and documentation gates pass.
 The remaining roadmap replaces the original 32-module plan. The goal is one
 demonstrable browser voice qualification product with provider failover, live
 Lead-owned qualification/scoring, and one central dashboard. Modules 1–7 are
-implemented and reverified; Modules 8–14 are implemented and verified below.
-Modules 15–18 remain planned. Module 14's approved workflow-action boundary,
-lightweight policy and durable reminder gates are complete; Module 15 is unstarted.
+implemented and reverified; Modules 8–15 are implemented and verified below.
+Modules 16–18 remain planned. Module 15's approved dashboard read APIs and central
+frontend gates are complete; Module 16 is unstarted.
 
 1. Repository and development infrastructure
 2. PostgreSQL, migrations, and base domain models
@@ -1159,5 +1159,206 @@ database was removed after verification. Paid-provider human-microphone quality/
 latency and Docker browser-audio reachability remain unverified; the user deferred
 their interactive voice test until the frontend is available. The policies and
 local reminder effect are deliberately bounded demo behavior. Modules 12–14 remain
-uncommitted on top of `d9db88b`. Stop here; next is **15 — Central Dashboard + Live
-Call Interface**, unstarted and requiring separate authorization.
+uncommitted on top of `d9db88b` at that checkpoint. The user subsequently committed
+Modules 12–14 as `4ce9107` and approved Module 15, recorded below.
+
+## Module 15 — central dashboard and live call interface
+
+Complete on 2026-10-05. Inspection found that existing APIs required known
+conversation/call IDs, `/live-state` depended on Lead availability, and no HTTP
+boundary exposed conversation-owned event metadata or session router health.
+The user explicitly approved bounded additive discovery/call/event reads and a
+capability-protected session status endpoint. They also approved leaving failure
+simulation and evaluation execution unavailable until Modules 16/17.
+
+### Frontend and service boundaries
+
+`apps/dashboard` is a Node 22 Next.js 16.3.8 / React 19.3.0 TypeScript application,
+installed as a root npm workspace with a committed lockfile. It adds one central
+product interface, responsive layout, keyboard focus states and reduced-motion
+support. Production standalone output includes its static assets and runs as a
+non-root Node process in Compose. No external fonts/assets or paid providers are
+required to render the interface.
+
+The browser sends same-origin `/api/v1/...` and `/api/voice/sessions/...` requests
+to a bounded Next server proxy. Its fixed server-only `GATEWAY_URL` is the sole
+upstream; it never accesses PostgreSQL, Redis or internal domain services. Paths
+are constrained to public Gateway/runtime namespaces, redirects are refused,
+timeouts are explicit, responses are uncached and upstream errors are redacted.
+Only the owning voice capability is forwarded for voice operations; service/provider
+keys are not exposed. Mutations with a foreign Origin are rejected. Host matching
+uses the public Host header because standalone Next internally normalizes URLs to
+its bind address. Proxy budgets are 25 seconds, 128 KiB request and 8 MiB response;
+browser requests have a 30-second deadline. This preserves the existing local-demo
+public Gateway boundary without adding a user-identity service.
+
+Lead/Conversation retain all business state, qualification/scoring and workflow
+ownership. The runtime retains Pipecat, provider routers and media lifecycle.
+There are no new database tables, migrations, indexes, business workers, Redis
+consumers, scoring rules, workflow policies or state-machine changes.
+
+### Approved read contracts
+
+| Method/path | Owner/result |
+|---|---|
+| `GET /v1/conversations?lead_id=UUID&active_only=false&limit=50&offset=0` | Conversation Service → Gateway; `ConversationListResponse` |
+| `GET /v1/conversations/{id}/calls?limit=50&offset=0` | Conversation Service → Gateway; `CallListResponse` including independently queried `active_call` |
+| `GET /v1/conversations/{id}/events?limit=50&offset=0` | Conversation Service → Gateway; `ConversationEventsResponse` |
+| `GET /voice/sessions/{session_id}/status` | Mounted runtime; owning bearer capability required |
+
+Durable reads require the existing internal service authentication and normalized
+Gateway request IDs. Limits are 1–100, offsets 0–10,000; listing conversations
+requires a lead UUID and does not call Lead. Unknown lead IDs produce an empty
+list; unknown conversation IDs produce 404 for calls/events. Results are newest
+first with timestamp/UUID tie-breaks. Existing one-active-conversation and call
+invariants remain. These APIs depend on Conversation/PostgreSQL, not Lead/Redis;
+the original `/live-state` keeps its original authoritative Lead dependency.
+
+Events are limited to Conversation Service's own conversation-scoped outbox
+records, including its call/turn/workflow events. Responses expose ID/type/producer,
+aggregate ID/type/version, occurred/published times and attempt count only. They
+exclude payloads, receipt hashes, errors, transcript/evidence and service tokens.
+This is an outbox metadata view, not a new event bus, cross-service analytics read
+model or proof of consumption. New events can shift offset pages; polling is not
+a lossless delivery subscription.
+
+Session status exposes owning conversation/call IDs, media state, ready/ending/
+closed and pending-operation flags, remaining lifetime, configured mock/real modes
+and snapshots from the existing LLM/STT/TTS routers. It omits token/SDP/credentials.
+Wrong/missing capabilities and missing sessions retain indistinguishable 404s.
+Health is explicitly **session/process-local** operational memory, not global
+durable provider health or a production fleet metric.
+
+### Dashboard behavior and recovery
+
+- Paginated synthetic lead list, page-local search, profile and create form.
+  Lead creation preserves its synthetic key across ambiguous replies; bounded
+  reconciliation (at most 1,000 leads / 10 pages with a 15-second admission budget)
+  finds an already committed create before reusing that same key. Field correction
+  is allowed after definitive validation rejection. No blind new-key create retry.
+- Lead selection discovers the active conversation separately from the latest
+  100 historical conversations. URL state contains only lead/conversation IDs;
+  no capability, transcript or score is persisted in browser storage. A lead
+  without a conversation remains selectable/reloadable.
+- Start/resume rechecks active conversation and call records. Lost create replies
+  reconcile through those reads instead of repeating unguarded mutations. Existing
+  outcome workflows must finish before another qualification flow starts.
+- WebRTC controls support microphone permission/error feedback, push-to-talk or
+  automatic VAD, reconnect, durable recovery and end. Push-to-talk waits for
+  **runtime readiness plus connected media**, not the raw peer connection event.
+  Full regression reproduced an early-click race; the readiness gate and a focused
+  browser regression now cover it. Replaced peers' late callbacks are ignored.
+- Ambiguous SDP replies retry the exact cached peer/offer/capability payload.
+  Accepted runtime sessions are never recreated during signaling retry. A lost
+  initial session-create response cannot recover an unknown capability; the
+  existing attach grace/reaper frees that reservation. UI errors expose recovery.
+- Media capabilities live only in memory. Page exit/unmount stops tracks and
+  requests closure with keepalive; backend reconnect/expiry remains the recovery
+  backstop. Failed end keeps its identity retryable while always stopping local
+  media; it cannot reopen through a subsequent reconnect. Missing-session 404
+  permits local cleanup. Committed workflow auto-closure is observed and released.
+- Real-time data-channel notifications trigger durable reads; a 2.5-second
+  non-overlapping poll reconciles conversation, calls, history, qualification,
+  workflows, events and the browser's session status. Requests from an obsolete
+  selection do not overwrite the current conversation. Transcript pagination
+  loads 50-message pages up to a 500-message UI bound; interim text is explicitly
+  uncommitted, agent text generated rather than playback-confirmed.
+- Lead failures clear the current qualification/score and next question and mark
+  them unavailable. There is no cached score substitution. Durable transcript/
+  call/workflow/event reads remain independently available. Other failed reads
+  label retained last-successful snapshots and disable dependent workflow controls.
+- Qualification displays status, values/conflicts, backend next question,
+  authoritative classification/rule version/calculation time, and coverage `/60`.
+  It explicitly states that coverage is not immigration eligibility.
+- Handoff assignment/completion/cancellation and follow-up completion/cancellation/
+  explicit retry use the existing Module 14 endpoints. Lost operation responses
+  retain the original operation UUID/payload for explicit recovery. Reminder
+  dispatch remains the existing operator CLI, not a browser timer or new scheduler.
+- Call history, current business state, bounded event metadata and provider
+  snapshots are visible. Failure simulation and evaluation panels are disabled
+  with their assigned module numbers; their future execution is not implemented.
+
+### Local and container launch
+
+The rebuilt stack is running with mock providers. Open **http://localhost:3000**.
+Gateway remains at `http://localhost:18000`; its minimal `/voice/` test page remains.
+
+```bash
+POSTGRES_PORT=55432 REDIS_PORT=56379 API_GATEWAY_PORT=18000 DASHBOARD_PORT=3000 \
+VOICE_RUNTIME_ENABLED=1 LLM_MODE=mock SPEECH_MODE=mock \
+  docker compose up -d --build --wait
+```
+
+Use Node 22 and npm 10 for host development:
+
+```bash
+npm ci
+npm run dashboard:check
+npm run dashboard:build
+# Use port 3001 alongside the running container frontend.
+GATEWAY_URL=http://127.0.0.1:18000 npm run dev --workspace apps/dashboard -- --port 3001
+```
+
+For the **verified host-media path**, launch Lead/Conversation/Gateway using
+Module 12's host variables/commands, with optional real provider settings from
+`.env.example`. Point the same frontend at the host Gateway:
+
+```bash
+GATEWAY_URL=http://127.0.0.1:8000 npm run dev --workspace apps/dashboard -- --port 3001
+```
+
+The UI does not select/change paid providers or transmit their keys. Mock STT/TTS
+produce fixture text/tone and the default mock LLM proposes no facts. Scripted
+providers in automated tests demonstrate real Lead validation/scoring/workflows.
+Human-microphone paid recognition/synthesis/extraction quality/latency and Docker
+browser-to-runtime UDP/NAT reachability remain unverified; host Chrome/WebRTC is
+the demonstrated media path. Docker frontend hydration/API proxy and image startup
+are separately verified. Production TLS/NAT/identity infrastructure remains deferred.
+
+### Verification and continuation
+
+**12 new Python integration cases** (9 real-DB read-boundary cases and 3 production
+Next/Chrome actual-service cases) plus **7 frontend Playwright cases** cover scope,
+bounds/auth, Lead outage isolation, sanitized event/health snapshots, discovery/
+reload, live score/transcript, identical lost-offer replay, reconnect, workflow
+acknowledgement/auto media close/operator lifecycle, lost lead-create recovery,
+microphone denial, lost workflow-operation recovery, backend readiness, proxy
+constraints and responsive layout. The actual voice case asserts one score-history
+effect, five durable messages, terminal business outcome and ended original call.
+An inspected synthetic browser screenshot verifies the rendered product layout.
+
+Full Python gate: **556 passed, one expected Compose skip** (557 collected), with
+real PostgreSQL/Redis, migrations and all five opt-in Chrome cases (two historical
+voice modes plus three new production dashboard cases). Frontend type/format/
+production build passed; **7 Playwright tests passed**. **6 rebuilt deployment
+tests passed**, extending the conversation case through the container Next proxy;
+its additionally enabled Chrome variant verifies deployed frontend hydration,
+authoritative score and durable acknowledgement against the running containers.
+Ruff format/lint (141 files), strict mypy (123 files), host/Gateway/Conversation
+dependency checks, Compose config/whitespace and deployed Alembic drift pass.
+Head remains `e8f2a6b3c901`. Processes and health are restored; unpublished/exhausted
+outbox and dead-letter counts are zero. The disposable `module15_test` was removed.
+
+Recreate/migrate a dedicated test DB before rerunning:
+
+```bash
+npm run dashboard:build
+RUN_DASHBOARD_BROWSER_TESTS=1 RUN_BROWSER_VOICE_TESTS=1 \
+DASHBOARD_NODE=/absolute/path/to/node22 \
+CHROME_EXECUTABLE='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' \
+VOICE_TEST_WAV=/absolute/path/to/synthetic-speech.wav \
+TEST_DATABASE_URL=postgresql+asyncpg://voice_ai:voice_ai_dev_password@localhost:55432/module15_test \
+TEST_REDIS_URL=redis://localhost:56379/15 \
+  .venv/bin/python -m pytest --ignore=tests/integration/test_event_stack.py
+npm run dashboard:test
+```
+
+Frontend tests default to port 3175 (override `DASHBOARD_TEST_PORT`) and accept
+`CHROME_EXECUTABLE`. Production dashboard Python cases explicitly skip without
+their opt-in/build; skipped cases do not count as browser verification. For the
+deployed Module 12/14 command, also set `STACK_DASHBOARD_URL=http://localhost:3000`
+and `RUN_DASHBOARD_BROWSER_TESTS=1` to include the container Chrome read path.
+
+Module 15 is uncommitted on top of `4ce9107`; the user's Modules 12–14 commit is
+preserved. Stop here. Next is **Module 16 — Useful Observability + Failure Simulation**,
+requiring separate authorization.

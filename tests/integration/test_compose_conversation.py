@@ -307,6 +307,56 @@ async def test_compose_gateway_conversation_live_turn() -> None:
             )
             assert cancelled.status_code == 200, cancelled.text
 
+            if os.getenv("STACK_DASHBOARD_URL"):
+                async with httpx.AsyncClient(
+                    base_url=os.environ["STACK_DASHBOARD_URL"], timeout=8
+                ) as frontend:
+                    page = await frontend.get("/")
+                    assert (
+                        page.status_code == 200 and "Every conversation, in context." in page.text
+                    )
+                    discovered = await frontend.get(
+                        "/api/v1/conversations", params={"lead_id": str(lead_id)}
+                    )
+                    assert discovered.status_code == 200
+                    assert discovered.json()["items"][0]["id"] == str(conversation_id)
+                    durable_calls = await frontend.get(
+                        f"/api/v1/conversations/{conversation_id}/calls"
+                    )
+                    assert durable_calls.status_code == 200 and durable_calls.json()["total"] >= 1
+                    metadata = await frontend.get(f"/api/v1/conversations/{conversation_id}/events")
+                    assert metadata.status_code == 200 and metadata.json()["total"] > 0
+                    assert all("payload" not in item for item in metadata.json()["items"])
+                if os.getenv("RUN_DASHBOARD_BROWSER_TESTS") == "1":
+                    from playwright.async_api import async_playwright, expect
+
+                    async with async_playwright() as playwright:
+                        browser = await playwright.chromium.launch(
+                            executable_path=os.getenv(
+                                "CHROME_EXECUTABLE",
+                                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                            ),
+                            headless=True,
+                        )
+                        try:
+                            browser_page = await browser.new_page()
+                            await browser_page.goto(
+                                os.environ["STACK_DASHBOARD_URL"] + f"/?lead={lead_id}"
+                            )
+                            await expect(
+                                browser_page.get_by_role(
+                                    "heading", name="Compose Conversation Lead"
+                                )
+                            ).to_be_visible()
+                            await expect(
+                                browser_page.locator(".score-display strong")
+                            ).to_have_text("30")
+                            await expect(
+                                browser_page.get_by_role("log", name="Durable transcript")
+                            ).to_contain_text("Your request for human assistance")
+                        finally:
+                            await browser.close()
+
             async def published() -> bool:
                 async with sessions() as session:
                     return bool(

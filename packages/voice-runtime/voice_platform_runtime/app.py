@@ -4,6 +4,7 @@ import asyncio
 import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Literal
 from uuid import UUID, uuid4
@@ -465,6 +466,36 @@ def create_app(conversation_url: str, token: str | None) -> FastAPI:
             "token": session.token,
             "speech_mode": app.state.speech.mode,
             "llm_mode": app.state.llm.mode,
+        }
+
+    @app.get("/sessions/{sid}/status")
+    async def session_status(
+        sid: UUID, authorization: str | None = Header(default=None)
+    ) -> dict[str, object]:
+        session = session_for(sid, authorization)
+        return {
+            "session_id": str(sid),
+            "conversation_id": str(session.data.conversation_id),
+            "call_id": str(session.data.call_id),
+            "closed": session.closed,
+            "ending": session.ending,
+            "ready": session.processor.ready,
+            "pending_operation": session.dialogue.pending is not None
+            or session.dialogue.workflow_pending is not None,
+            "media_state": session.connection.pc.connectionState
+            if session.connection
+            else "unattached",
+            "expires_in_seconds": max(
+                0, 1800 - (asyncio.get_running_loop().time() - session.created)
+            ),
+            "llm_mode": app.state.llm.mode,
+            "speech_mode": app.state.speech.mode,
+            "providers": {
+                "llm": [asdict(h) for h in session.dialogue.llm.health()],
+                "stt": [asdict(h) for h in session.processor.stt.health()],
+                "tts": [asdict(h) for h in session.processor.tts.health()],
+            },
+            "scope": "session_process_local",
         }
 
     @app.post("/sessions/{sid}/offer")

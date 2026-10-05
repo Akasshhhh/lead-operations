@@ -31,6 +31,11 @@ from voice_platform_contracts.conversation import (
     TranscriptHistoryResponse,
     TranscriptQuery,
 )
+from voice_platform_contracts.dashboard import (
+    CallListResponse,
+    ConversationEventsResponse,
+    ConversationListResponse,
+)
 from voice_platform_contracts.http import normalize_request_id
 from voice_platform_contracts.lead import (
     HealthResponse,
@@ -282,6 +287,62 @@ def create_app(
             request_id=request_id(request), lead_id=lead_id
         )
         return validate_response(QualificationResponse, result)
+
+    @app.get("/v1/conversations", response_model=ConversationListResponse)
+    async def list_conversations(
+        request: Request,
+        lead_id: UUID,
+        active_only: bool = False,
+        limit: int = Query(default=50, ge=1, le=100),
+        offset: int = Query(default=0, ge=0, le=10000),
+        conversation_client: ConversationServiceClient = Depends(get_conversation_client),
+    ) -> ConversationListResponse:
+        result = await conversation_client.request(
+            "GET",
+            "/v1/conversations",
+            request_id=request_id(request),
+            params={
+                "lead_id": str(lead_id),
+                "active_only": str(active_only).lower(),
+                "limit": limit,
+                "offset": offset,
+            },
+        )
+        return validate_response(ConversationListResponse, result)
+
+    @app.get("/v1/conversations/{conversation_id}/calls", response_model=CallListResponse)
+    async def list_calls(
+        request: Request,
+        conversation_id: UUID,
+        limit: int = Query(default=50, ge=1, le=100),
+        offset: int = Query(default=0, ge=0, le=10000),
+        conversation_client: ConversationServiceClient = Depends(get_conversation_client),
+    ) -> CallListResponse:
+        result = await conversation_client.request(
+            "GET",
+            f"/v1/conversations/{conversation_id}/calls",
+            request_id=request_id(request),
+            params={"limit": limit, "offset": offset},
+        )
+        return validate_response(CallListResponse, result)
+
+    @app.get(
+        "/v1/conversations/{conversation_id}/events", response_model=ConversationEventsResponse
+    )
+    async def list_events(
+        request: Request,
+        conversation_id: UUID,
+        limit: int = Query(default=50, ge=1, le=100),
+        offset: int = Query(default=0, ge=0, le=10000),
+        conversation_client: ConversationServiceClient = Depends(get_conversation_client),
+    ) -> ConversationEventsResponse:
+        result = await conversation_client.request(
+            "GET",
+            f"/v1/conversations/{conversation_id}/events",
+            request_id=request_id(request),
+            params={"limit": limit, "offset": offset},
+        )
+        return validate_response(ConversationEventsResponse, result)
 
     @app.post("/v1/conversations", response_model=ConversationResponse, status_code=201)
     async def create_conversation(

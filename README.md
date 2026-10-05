@@ -7,7 +7,21 @@ integration, failure, and documentation gates before the next module begins.
 
 ## Current status
 
-**Modules 1–11 — Foundation, domain services, events, transcripts, LLM and speech routing**
+**Modules 1–15 — Backend, browser voice, live qualification, workflows, and central dashboard**
+
+The central Next.js dashboard is implemented: synthetic lead selection/creation,
+start/resume voice calls, live transcripts, authoritative qualification/scoring,
+call history, handoff/follow-up controls, session-local provider health, and safe
+conversation event metadata. It keeps durable history/call state readable during
+Lead outages and shows qualification as unavailable rather than substituting a
+cached score. Failure simulation and evaluation controls are reserved for Modules
+16/17. Latest contracts, verification and limits:
+[`docs/implementation-plan.md`](docs/implementation-plan.md).
+
+Latest gates: **556 Python regressions passed** (one expected deployment skip),
+**7 frontend browser tests**, and **6 rebuilt Compose deployment tests**. Paid
+providers are optional; defaults remain fixture transcripts/tones rather than real
+recognition/synthesis. The historical module results below describe earlier gates.
 
 The current implementation establishes the Python/Node version conventions,
 shared configuration validation, PostgreSQL persistence, deterministic leads,
@@ -72,7 +86,7 @@ The approved reduced plan runs from **Modules 8–18**:
 | 17 | Realistic evaluation, voice E2E, failure recovery, and basic concurrency |
 | 18 | Final regression/hardening, configuration, documentation, and demo runbook |
 
-Next is **Module 12 — Pipecat browser/WebRTC voice runtime**, currently unstarted. Each module
+Next is **Module 16 — Useful observability and failure simulation**, currently unstarted. Each module
 begins with inspection and a conflict-stop gate and ends with relevant tests and
 documentation. Exact scope/gates and deferred infrastructure are in
 [`docs/implementation-plan.md`](docs/implementation-plan.md).
@@ -84,6 +98,36 @@ documentation. Exact scope/gates and deferred infrastructure are in
 - Docker Desktop with Docker Compose
 
 The repository includes `.python-version` and `.nvmrc` for version managers.
+
+## Central dashboard
+
+Run the full mock stack and open **http://localhost:3000**:
+
+```bash
+POSTGRES_PORT=55432 REDIS_PORT=56379 API_GATEWAY_PORT=18000 DASHBOARD_PORT=3000 \
+VOICE_RUNTIME_ENABLED=1 LLM_MODE=mock SPEECH_MODE=mock \
+  docker compose up -d --build --wait
+docker compose exec lead-service python -m lead_service.seed
+```
+
+Select a synthetic lead, then **Start / resume call**. Push-to-talk is the default;
+automatic voice activity detection can be selected before connecting. Durable
+business conversations and audio connections have independent lifecycles.
+
+For host frontend development with Node 22/npm 10:
+
+```bash
+npm ci
+npm run dashboard:check
+npm run dashboard:build
+GATEWAY_URL=http://127.0.0.1:18000 npm run dev --workspace apps/dashboard -- --port 3001
+```
+
+`GATEWAY_URL` is server-only. Frontend requests use the same-origin Next proxy;
+no service/provider key is required in the browser. For the verified host WebRTC
+audio path, use the host Gateway launch in the Module 12 section of the plan and
+point the frontend to `http://127.0.0.1:8000`. Container frontend/API integration is
+verified; Docker runtime UDP/NAT audio reachability remains unverified.
 
 ## Local setup
 
@@ -137,8 +181,9 @@ make infra-down
 ```
 
 Local development and tests do not require external LLM, STT, or TTS credentials.
-The deterministic LLM mock and optional OpenAI/OpenRouter adapters are available
-now. Speech adapters remain in later modules.
+The deterministic LLM mock, optional OpenAI/OpenRouter adapters, and Sarvam STT
+plus Sarvam/Rumik TTS adapters are available. Real mode requires server-side keys
+for enabled providers; `.env.example` documents the configuration.
 
 ## Development commands
 

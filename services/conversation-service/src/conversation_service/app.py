@@ -9,7 +9,7 @@ from typing import Any, cast
 from uuid import UUID, uuid4
 
 import httpx
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
@@ -36,6 +36,11 @@ from voice_platform_contracts.conversation import (
     TranscriptHistoryResponse,
     TranscriptQuery,
 )
+from voice_platform_contracts.dashboard import (
+    CallListResponse,
+    ConversationEventsResponse,
+    ConversationListResponse,
+)
 from voice_platform_contracts.lead import LeadResponse, QualificationFact, QualificationUpdate
 from voice_platform_contracts.qualification import (
     ProposedFacts,
@@ -58,6 +63,7 @@ from voice_platform_db import create_async_engine, create_session_factory
 from voice_platform_db.models import Message
 
 from .client import LeadServiceClient, LeadServiceResponseError, LeadServiceUnavailableError
+from .dashboard import DashboardReads
 from .policy import WorkflowPolicyError
 from .responses import message_response as _message_response
 from .service import (
@@ -350,6 +356,46 @@ def create_app(
     async def health(session: AsyncSession = Depends(get_session)) -> dict[str, str]:
         await session.execute(text("SELECT 1"))
         return {"status": "ok", "database": "ok"}
+
+    @app.get(
+        "/v1/conversations",
+        response_model=ConversationListResponse,
+        dependencies=[Depends(verify_service_auth)],
+    )
+    async def list_conversations(
+        lead_id: UUID,
+        active_only: bool = False,
+        limit: int = Query(default=50, ge=1, le=100),
+        offset: int = Query(default=0, ge=0, le=10000),
+        session: AsyncSession = Depends(get_session),
+    ) -> ConversationListResponse:
+        return await DashboardReads(session).conversations(lead_id, active_only, limit, offset)
+
+    @app.get(
+        "/v1/conversations/{conversation_id}/calls",
+        response_model=CallListResponse,
+        dependencies=[Depends(verify_service_auth)],
+    )
+    async def list_calls(
+        conversation_id: UUID,
+        limit: int = Query(default=50, ge=1, le=100),
+        offset: int = Query(default=0, ge=0, le=10000),
+        session: AsyncSession = Depends(get_session),
+    ) -> CallListResponse:
+        return await DashboardReads(session).calls(conversation_id, limit, offset)
+
+    @app.get(
+        "/v1/conversations/{conversation_id}/events",
+        response_model=ConversationEventsResponse,
+        dependencies=[Depends(verify_service_auth)],
+    )
+    async def list_events(
+        conversation_id: UUID,
+        limit: int = Query(default=50, ge=1, le=100),
+        offset: int = Query(default=0, ge=0, le=10000),
+        session: AsyncSession = Depends(get_session),
+    ) -> ConversationEventsResponse:
+        return await DashboardReads(session).events(conversation_id, limit, offset)
 
     @app.post(
         "/v1/conversations",

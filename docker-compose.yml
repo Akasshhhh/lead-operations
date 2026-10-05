@@ -164,6 +164,20 @@ services:
     networks:
       - voice_ai
 
+  dashboard:
+    build:
+      context: .
+      dockerfile: apps/dashboard/Dockerfile
+    environment:
+      GATEWAY_URL: http://api-gateway:8000
+    ports:
+      - "${DASHBOARD_PORT:-3000}:3000"
+    depends_on:
+      api-gateway:
+        condition: service_started
+    networks:
+      - voice_ai
+
 networks:
   voice_ai:
     name: voice_ai

@@ -4,7 +4,7 @@ PYTHON ?= python3
 VENV_PYTHON := .venv/bin/python
 
 .PHONY: install format format-check lint typecheck test check infra-up infra-down infra-validate \
-	db-upgrade db-downgrade db-current seed-leads events-inspect test-events
+ db-upgrade db-downgrade db-current seed-leads events-inspect test-events dashboard-check dashboard-dev
 
 install: .venv
 	$(VENV_PYTHON) -m pip install --upgrade pip
@@ -61,3 +61,10 @@ events-inspect:
 
 test-events:
 	$(VENV_PYTHON) -m pytest tests/unit/test_event_contracts.py tests/integration/test_events.py
+
+dashboard-check:
+	npm run dashboard:check
+	npm run dashboard:build
+
+dashboard-dev:
+	npm run dashboard:dev

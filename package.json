@@ -2,6 +2,13 @@
   "name": "voice-ai-platform",
   "version": "0.1.0",
   "private": true,
+  "workspaces": ["apps/dashboard"],
+  "scripts": {
+    "dashboard:dev": "npm run dev --workspace apps/dashboard",
+    "dashboard:build": "npm run build --workspace apps/dashboard",
+    "dashboard:check": "npm run typecheck --workspace apps/dashboard && npm run format-check --workspace apps/dashboard",
+    "dashboard:test": "npm run test --workspace apps/dashboard"
+  },
   "engines": {
     "node": ">=22 <23"
   },
