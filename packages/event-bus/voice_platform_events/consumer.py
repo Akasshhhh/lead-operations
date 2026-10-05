@@ -81,12 +81,20 @@ class Consumer:
                 group=self.group,
                 attempt=delivery.attempt,
                 error=type(exc).__name__,
+                request_id=event.request_id,
+                trace_id=event.trace_id,
             )
             return True
         # Acknowledgement failure is not a handler failure. Propagate; the pending
         # delivery will be reclaimed and its committed marker will suppress effects.
         await self.bus.acknowledge(delivery)
-        emit("consumer.acknowledged", event_id=str(event.event_id), group=self.group)
+        emit(
+            "consumer.acknowledged",
+            event_id=str(event.event_id),
+            group=self.group,
+            request_id=event.request_id,
+            trace_id=event.trace_id,
+        )
         return True
 
 

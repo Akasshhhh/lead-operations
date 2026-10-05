@@ -19,9 +19,11 @@ from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.responses import Response
 from voice_platform_config import SERVICE_TOKEN_HEADER, service_token_is_valid
+from voice_platform_config.observability import RequestTelemetry, Telemetry
 from voice_platform_config.service_auth import validate_service_auth
 from voice_platform_config.settings import database_url_from_env
 from voice_platform_contracts.http import normalize_request_id
+from voice_platform_contracts.observability import OperationalSnapshot
 from voice_platform_contracts.qualification import (
     QualificationPlan,
     ValidatedFacts,
@@ -108,6 +110,15 @@ def create_app(
             await engine.dispose()
 
     app = FastAPI(title="Lead Service", version="0.1.0", lifespan=lifespan)
+    telemetry = Telemetry("lead-service")
+
+    @app.get(
+        "/v1/observability",
+        response_model=OperationalSnapshot,
+        dependencies=[Depends(verify_service_auth)],
+    )
+    async def operational_status() -> OperationalSnapshot:
+        return OperationalSnapshot.model_validate(telemetry.snapshot())
 
     @app.middleware("http")
     async def correlation_middleware(request: Request, call_next: Any) -> Response:
@@ -352,6 +363,7 @@ def create_app(
             ),
         )
 
+    app.add_middleware(RequestTelemetry, telemetry=telemetry)
     return app
 
 

@@ -279,9 +279,7 @@ test("mobile layout stays usable and later-module controls are unavailable", asy
   await expect(
     page.getByRole("heading", { name: "Amelia Chen" }),
   ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "Available in Module 16" }),
-  ).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Arm fault" })).toBeDisabled();
   await expect(
     page.getByRole("button", { name: "Available in Module 17" }),
   ).toBeDisabled();

@@ -25,11 +25,22 @@ from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 from pipecat.workers.runner import WorkerRunner
 from pydantic import BaseModel, ConfigDict, Field
+from voice_platform_config.observability import Telemetry
 from voice_platform_contracts.conversation import CallResponse
-from voice_platform_llm import LLMSettings
-from voice_platform_speech import SpeechSettings
+from voice_platform_llm import LLMError, LLMSettings
+from voice_platform_speech import SpeechError, SpeechSettings
 
 from .backend import Backend, DependencyError
+from .diagnostics import (
+    FaultConflict,
+    FaultCreate,
+    Faults,
+    ObservedBackend,
+    ObservedLLM,
+    ObservedSTT,
+    ObservedTTS,
+    faults_enabled,
+)
 from .processor import CommandFrame, VoiceProcessor
 from .qualified import QualifiedDialogue
 
@@ -74,8 +85,19 @@ class Session:
         self.token = secrets.token_urlsafe(32)
         self.data = data
         self.backend = backend
+        self.telemetry = Telemetry("voice-session")
+        self.faults = Faults(self.telemetry)
         self.dialogue = QualifiedDialogue(
-            backend, llm.build_router(providers), data.conversation_id, data.call_id
+            ObservedBackend(backend, self.telemetry, self.faults),
+            llm.build_router(providers),
+            data.conversation_id,
+            data.call_id,
+        )
+        from dataclasses import replace
+
+        self.dialogue.llm.slots = tuple(
+            replace(slot, provider=ObservedLLM(slot.provider, self.telemetry, self.faults, i == 0))
+            for i, slot in enumerate(self.dialogue.llm.slots)
         )
         # STT deadlines include live input collection; reserve time for a bounded 30 s utterance.
         stt_settings = speech.model_copy(
@@ -87,6 +109,14 @@ class Session:
             speech.build_tts(providers),
             self.notify,
             manual=data.manual_turns,
+        )
+        self.processor.stt.slots = tuple(
+            replace(slot, provider=ObservedSTT(slot.provider, self.telemetry, self.faults, i == 0))
+            for i, slot in enumerate(self.processor.stt.slots)
+        )
+        self.processor.tts.slots = tuple(
+            replace(slot, provider=ObservedTTS(slot.provider, self.telemetry, self.faults, i == 0))
+            for i, slot in enumerate(self.processor.tts.slots)
         )
         self.dialogue.notify = self.notify
         self.processor.finish_media = self.finish_media
@@ -106,6 +136,15 @@ class Session:
         self.last_answer: dict[str, str] | None = None
 
     async def notify(self, payload: dict[str, object]) -> None:
+        kind = payload.get("type")
+        if kind in {"error", "connected", "interrupted", "recovered", "workflow", "qualification"}:
+            self.telemetry.record(
+                "media." + str(kind),
+                "error" if kind == "error" else "ok",
+                0,
+                conversation_id=str(self.data.conversation_id),
+                call_id=str(self.data.call_id),
+            )
         if self.connection is not None:
             self.connection.send_app_message(payload)
 
@@ -169,7 +208,7 @@ class Session:
                 await self.notify({"type": "connected", "call_id": str(self.data.call_id)})
                 if self.worker is not None:
                     await self.worker.queue_frame(CommandFrame("greet"))
-            except DependencyError:
+            except (DependencyError, LLMError, SpeechError):
                 await self.notify(
                     {"type": "error", "code": "dependency_unavailable", "retry_required": True}
                 )
@@ -353,6 +392,7 @@ class Session:
 
 
 def create_app(conversation_url: str, token: str | None) -> FastAPI:
+    demo_enabled = faults_enabled()
     sessions: dict[UUID, Session] = {}
     offer_locks: dict[UUID, asyncio.Lock] = {}
 
@@ -496,7 +536,37 @@ def create_app(conversation_url: str, token: str | None) -> FastAPI:
                 "tts": [asdict(h) for h in session.processor.tts.health()],
             },
             "scope": "session_process_local",
+            "diagnostics": session.telemetry.snapshot(),
+            "faults_enabled": demo_enabled,
+            "active_fault": session.faults.snapshot(),
         }
+
+    @app.post("/sessions/{sid}/faults")
+    async def arm_fault(
+        sid: UUID, data: FaultCreate, authorization: str | None = Header(default=None)
+    ) -> dict[str, object]:
+        session = session_for(sid, authorization)
+        if not demo_enabled:
+            raise HTTPException(404, "demo faults unavailable")
+        if session.closed or session.ending:
+            raise HTTPException(409, "session ending")
+        try:
+            session.faults.arm(data)
+        except FaultConflict:
+            raise HTTPException(409, "fault identity conflict or capacity reached") from None
+        except ValueError:
+            raise HTTPException(422, "invalid fault combination") from None
+        return {"active_fault": session.faults.snapshot()}
+
+    @app.delete("/sessions/{sid}/faults")
+    async def reset_fault(
+        sid: UUID, authorization: str | None = Header(default=None)
+    ) -> dict[str, bool]:
+        session = session_for(sid, authorization)
+        if not demo_enabled:
+            raise HTTPException(404, "demo faults unavailable")
+        session.faults.reset()
+        return {"reset": True}
 
     @app.post("/sessions/{sid}/offer")
     async def offer(

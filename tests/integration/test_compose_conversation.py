@@ -139,6 +139,10 @@ async def test_compose_gateway_conversation_live_turn() -> None:
                 assert [m["turn_status"] for m in history.json()["items"]] == ["APPLIED", "PENDING"]
                 current = await client.get(f"/v1/conversations/{conversation_id}")
                 assert current.json()["state"] == "DISCOVERY" and current.json()["version"] == 4
+                operations = (await client.get("/v1/observability")).json()
+                assert operations["lead"] is None
+                assert operations["conversation"]["service"] == "conversation-service"
+                assert any(m["errors"] > 0 for m in operations["gateway"]["metrics"])
             finally:
                 await asyncio.to_thread(compose, "start", "lead-service")
 
@@ -237,6 +241,20 @@ async def test_compose_gateway_conversation_live_turn() -> None:
                 media = created_voice.json()
                 media_path = f"/voice/sessions/{media['session_id']}"
                 assert (await client.delete(media_path)).status_code == 404
+                headers = {"Authorization": "Bearer " + media["token"]}
+                status = (await client.get(media_path + "/status", headers=headers)).json()
+                assert status["diagnostics"]["scope"] == "process_local"
+                fault = {"operation_id": str(uuid4()), "target": "llm", "mode": "unavailable"}
+                assert (await client.post(media_path + "/faults", json=fault)).status_code == 404
+                armed = await client.post(media_path + "/faults", headers=headers, json=fault)
+                assert armed.status_code == (200 if status["faults_enabled"] else 404)
+                if status["faults_enabled"]:
+                    assert armed.json()["active_fault"]["remaining_attempts"] == 2
+                    assert (
+                        await client.delete(media_path + "/faults", headers=headers)
+                    ).status_code == 200
+                    replay = await client.post(media_path + "/faults", headers=headers, json=fault)
+                    assert replay.json()["active_fault"] is None
                 ended_voice = await client.delete(
                     media_path, headers={"Authorization": "Bearer " + media["token"]}
                 )

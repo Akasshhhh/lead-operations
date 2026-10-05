@@ -909,6 +909,20 @@ audio {
   font-size: 9px;
   white-space: nowrap;
 }
+.diagnostics {
+  flex-direction: column;
+  align-items: stretch;
+  min-width: 0;
+}
+.diagnostics select {
+  display: block;
+  max-width: 100%;
+  width: 100%;
+  margin-top: 8px;
+}
+.diagnostics p {
+  overflow-wrap: anywhere;
+}
 .activity {
   font-size: 10px;
   color: var(--muted);

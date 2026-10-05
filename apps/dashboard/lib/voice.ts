@@ -163,6 +163,36 @@ export class VoiceClient {
     );
   }
 
+  armFault(target: string, mode: string) {
+    return api(
+      this.base() + "/faults",
+      "POST",
+      {
+        operation_id: crypto.randomUUID(),
+        target,
+        mode,
+        attempts: 2,
+        duration_seconds: 60,
+      },
+      this.session!.token,
+    );
+  }
+  resetFault() {
+    return api(
+      this.base() + "/faults",
+      "DELETE",
+      undefined,
+      this.session!.token,
+    );
+  }
+  disconnectForDemo() {
+    if (!this.negotiated || this.pendingOffer || this.ending)
+      throw new Error("Complete signaling before demonstrating disconnect.");
+    this.stopLocal();
+    this.pendingOffer = null;
+    this.notify({ type: "media", state: "disconnected" });
+  }
+
   private stopLocal() {
     this.peer?.close();
     this.peer = null;

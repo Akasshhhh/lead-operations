@@ -23,6 +23,7 @@ import type {
   SessionStatus,
   Workflow,
   Workflows,
+  OperationalOverview,
 } from "../lib/types";
 import { VoiceClient, type VoiceEvent } from "../lib/voice";
 
@@ -115,6 +116,10 @@ export default function Dashboard() {
   const [newCountry, setNewCountry] = useState("");
   const [newIntent, setNewIntent] = useState("");
   const [updated, setUpdated] = useState<string | null>(null);
+  const [operations, setOperations] = useState<OperationalOverview | null>(
+    null,
+  );
+  const [faultChoice, setFaultChoice] = useState("llm:unavailable");
   const voice = useRef<VoiceClient | null>(null);
   const audio = useRef<HTMLAudioElement | null>(null);
   const selection = useRef({
@@ -277,6 +282,12 @@ export default function Dashboard() {
     };
     try {
       await Promise.all([
+        read<OperationalOverview>(
+          "observability",
+          "/v1/observability",
+          setOperations,
+          () => setOperations(null),
+        ),
         read<Conversation>(
           "conversation",
           `/v1/conversations/${target}`,
@@ -1585,15 +1596,157 @@ export default function Dashboard() {
                 </div>
               </section>
               <div className="future-grid">
-                <section className="card future">
+                <section className="card future diagnostics">
                   <div>
                     <h2>Failure simulation</h2>
                     <p>
-                      Provider and dependency faults will be connected in Module
-                      16.
+                      Faults affect only this media session. Primary-provider
+                      attempts use the existing retry/failover policy; mock mode
+                      has one provider. Reset stops new injections; circuit
+                      cooldown still applies. Recovery finishes saved work
+                      without replaying speech.
                     </p>
                   </div>
-                  <button disabled>Available in Module 16</button>
+                  {!sessionStatus?.faults_enabled && (
+                    <p>
+                      Enable DEMO_FAULTS_ENABLED=1 in local/test Gateway
+                      configuration and connect a call.
+                    </p>
+                  )}
+                  <label>
+                    Demo fault
+                    <select
+                      aria-label="Demo fault"
+                      value={faultChoice}
+                      onChange={(e) => setFaultChoice(e.target.value)}
+                      disabled={!!busy || !sessionStatus?.faults_enabled}
+                    >
+                      <option value="llm:unavailable">
+                        Primary LLM unavailable
+                      </option>
+                      <option value="stt:unavailable">
+                        Primary STT unavailable
+                      </option>
+                      <option value="tts:unavailable">
+                        Primary TTS unavailable
+                      </option>
+                      <option value="llm:latency">
+                        LLM latency (+1 second)
+                      </option>
+                      <option value="tts:latency">
+                        TTS latency (+1 second)
+                      </option>
+                      <option value="dependency:timeout">
+                        Conversation apply timeout
+                      </option>
+                    </select>
+                  </label>
+                  <button
+                    disabled={
+                      !!busy ||
+                      !sessionStatus?.faults_enabled ||
+                      sessionStatus.ending ||
+                      retryRequired
+                    }
+                    onClick={() =>
+                      void action("Arming fault", async () => {
+                        const [target, mode] = faultChoice.split(":");
+                        await voice.current!.armFault(target, mode);
+                        setNotice(
+                          "Fault armed for up to two attempts / 60 seconds. Start a new turn to exercise it.",
+                        );
+                      })
+                    }
+                  >
+                    Arm fault
+                  </button>
+                  <button
+                    disabled={!!busy || !sessionStatus?.faults_enabled}
+                    onClick={() =>
+                      void action("Resetting faults", async () => {
+                        await voice.current!.resetFault();
+                        setNotice(
+                          "New fault injections stopped. Use Recover operation for saved work, or Reconnect for media.",
+                        );
+                      })
+                    }
+                  >
+                    Reset fault
+                  </button>
+                  <button
+                    disabled={
+                      !!busy ||
+                      !sessionStatus?.faults_enabled ||
+                      media !== "connected"
+                    }
+                    onClick={() =>
+                      void action("Disconnecting media", async () => {
+                        voice.current!.disconnectForDemo();
+                        setAgentReady(false);
+                        setNotice(
+                          "Local media disconnected. Reconnect preserves the durable call and conversation.",
+                        );
+                      })
+                    }
+                  >
+                    Disconnect media
+                  </button>
+                  {sessionStatus?.active_fault && (
+                    <p role="status">
+                      Armed: {sessionStatus.active_fault.target} /{" "}
+                      {sessionStatus.active_fault.mode} ·{" "}
+                      {sessionStatus.active_fault.remaining_attempts} attempts ·{" "}
+                      {Math.ceil(sessionStatus.active_fault.expires_in_seconds)}{" "}
+                      seconds
+                    </p>
+                  )}
+                  <p className="muted-note">
+                    These simulate boundary faults. Actual database, Redis and
+                    worker outages use operator deployment commands; the
+                    dashboard does not control containers.
+                  </p>
+                  <details>
+                    <summary>Operational measurements</summary>
+                    {errors.observability && (
+                      <p role="alert">Operational snapshots unavailable.</p>
+                    )}
+                    {[
+                      operations?.gateway,
+                      operations?.lead,
+                      operations?.conversation,
+                      sessionStatus?.diagnostics,
+                    ].map((snapshot, index) => (
+                      <div key={index}>
+                        <strong>
+                          {snapshot?.service || "Service snapshot unavailable"}
+                        </strong>
+                        {snapshot && (
+                          <>
+                            <p>
+                              Process/session memory ·{" "}
+                              {Math.floor(snapshot.uptime_seconds)} seconds
+                              uptime
+                            </p>
+                            {snapshot.metrics.slice(-12).map((metric) => (
+                              <p key={metric.operation}>
+                                {metric.operation} · {metric.count} operations ·{" "}
+                                {metric.errors} errors · mean{" "}
+                                {(
+                                  metric.total_ms / Math.max(1, metric.count)
+                                ).toFixed(0)}{" "}
+                                ms · max {metric.max_ms.toFixed(0)} ms
+                              </p>
+                            ))}
+                            <p>
+                              Latest: {snapshot.recent.at(-1)?.operation} /{" "}
+                              {snapshot.recent.at(-1)?.outcome} · request{" "}
+                              {snapshot.recent.at(-1)?.request_id || "none"}
+                            </p>
+                          </>
+                        )}
+                      </div>
+                    ))}
+                  </details>
                 </section>
                 <section className="card future">
                   <div>

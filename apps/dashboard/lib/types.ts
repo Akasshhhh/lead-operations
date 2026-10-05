@@ -137,4 +137,36 @@ export type SessionStatus = {
   llm_mode: string;
   speech_mode: string;
   scope: string;
+  diagnostics?: OperationalSnapshot;
+  faults_enabled?: boolean;
+  active_fault?: {
+    target: string;
+    mode: string;
+    remaining_attempts: number;
+    expires_in_seconds: number;
+  } | null;
+};
+
+export type OperationalSnapshot = {
+  service: string;
+  scope: string;
+  uptime_seconds: number;
+  metrics: {
+    operation: string;
+    count: number;
+    errors: number;
+    total_ms: number;
+    max_ms: number;
+  }[];
+  recent: {
+    operation: string;
+    outcome: string;
+    duration_ms: number;
+    request_id: string | null;
+  }[];
+};
+export type OperationalOverview = {
+  gateway: OperationalSnapshot;
+  lead: OperationalSnapshot | null;
+  conversation: OperationalSnapshot | null;
 };

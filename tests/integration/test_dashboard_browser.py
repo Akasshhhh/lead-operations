@@ -113,6 +113,7 @@ async def dashboard(
     monkeypatch.setenv("VOICE_RUNTIME_ENABLED", "1")
     monkeypatch.setenv("LLM_MODE", "mock")
     monkeypatch.setenv("SPEECH_MODE", "mock")
+    monkeypatch.setenv("DEMO_FAULTS_ENABLED", "1")
     stt = MockSTTProvider(MockSTTScript(text="I confirm my masters degree.", interim=None))
 
     def llm_router(self: LLMSettings, client: httpx.AsyncClient) -> LLMRouter:
@@ -239,6 +240,10 @@ async def test_production_dashboard_voice_score_reconnect_lost_offer_and_handoff
                 "I confirm my masters degree."
             )
             await expect(page.get_by_text("mock-dashboard", exact=True)).to_be_visible()
+            # Scoring precedes agent-output persistence; reconnect cancels unfinished output.
+            await expect(page.get_by_role("log", name="Durable transcript")).to_contain_text(
+                "How many years", timeout=20000
+            )
             screenshot = os.getenv("DASHBOARD_SCREENSHOT")
             if screenshot:
                 await page.screenshot(path=screenshot, full_page=True)
@@ -406,3 +411,84 @@ async def test_production_dashboard_recovers_lost_lead_creation_and_reload(
                         )
                     )
                     await db.execute(delete(Lead).where(Lead.id == created_id))
+
+
+async def test_dashboard_fault_reset_recovers_durable_turn_and_media(
+    system: System,
+    dashboard: tuple[str, MockSTTProvider],
+) -> None:
+    from playwright.async_api import async_playwright, expect
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(
+            executable_path=os.getenv(
+                "CHROME_EXECUTABLE", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+            ),
+            headless=True,
+            args=[
+                "--use-fake-device-for-media-stream",
+                "--use-fake-ui-for-media-stream",
+                "--autoplay-policy=no-user-gesture-required",
+            ],
+        )
+        try:
+            page = await browser.new_page()
+            await page.goto(dashboard[0])
+            await page.get_by_role("button", name="Start / resume call", exact=False).click()
+            await expect(
+                page.get_by_role("button", name="Start speaking", exact=False)
+            ).to_be_enabled(timeout=20000)
+            await expect(page.get_by_role("button", name="Arm fault", exact=True)).to_be_enabled()
+            await page.get_by_label("Demo fault").select_option("dependency:timeout")
+            await page.get_by_role("button", name="Arm fault", exact=True).click()
+            await expect(page.get_by_text("Armed: dependency", exact=False)).to_be_visible()
+            await page.get_by_role("button", name="Start speaking", exact=False).click()
+            await asyncio.sleep(0.3)
+            await page.get_by_role("button", name="Stop speaking", exact=False).click()
+            await expect(page.get_by_text("Voice operation:", exact=False)).to_be_visible(
+                timeout=15000
+            )
+            await expect(page.get_by_role("log", name="Durable transcript")).to_contain_text(
+                "I confirm my masters degree."
+            )
+            async with system.sessions() as db:
+                assert (
+                    await db.scalar(
+                        select(func.count())
+                        .select_from(LeadScoreHistory)
+                        .where(LeadScoreHistory.lead_id == system.lead_id)
+                    )
+                    == 0
+                )
+            await page.get_by_role("button", name="Reset fault", exact=True).click()
+            await page.get_by_role("button", name="Recover operation", exact=True).click()
+            await expect(page.locator(".score-display strong")).to_have_text("10", timeout=15000)
+            await page.get_by_role("button", name="Disconnect media", exact=True).click()
+            await page.get_by_role("button", name="Reconnect", exact=True).click()
+            await expect(
+                page.get_by_role("button", name="Start speaking", exact=False)
+            ).to_be_enabled(timeout=20000)
+            await page.get_by_text("Operational measurements", exact=True).click()
+            await expect(page.get_by_text("conversation.apply", exact=False)).to_be_visible()
+            await page.get_by_role("button", name="End call", exact=True).click()
+        finally:
+            await browser.close()
+    async with system.sessions() as db:
+        assert (
+            await db.scalar(
+                select(func.count())
+                .select_from(LeadScoreHistory)
+                .where(LeadScoreHistory.lead_id == system.lead_id)
+            )
+            == 1
+        )
+        assert (
+            await db.scalar(
+                select(func.count())
+                .select_from(Message)
+                .where(Message.conversation_id == system.conversation_id)
+            )
+            == 2
+        )  # greeting + recovered user; no audio/reply replay
+        call = await db.get(Call, system.call_id)
+        assert call is not None and call.status == "ENDED" and call.reconnect_attempts >= 1

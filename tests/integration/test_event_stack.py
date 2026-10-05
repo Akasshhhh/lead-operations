@@ -126,6 +126,9 @@ async def test_compose_database_and_lead_outages_recover_without_bad_mutations()
                 response = await client.request(method, endpoint, json=body)
                 assert response.status_code == 503, response.text
                 assert response.json()["error"]["request_id"] == response.headers["X-Request-ID"]
+            operations = await client.get("/v1/observability")
+            assert operations.status_code == 200
+            assert any(m["errors"] > 0 for m in operations.json()["lead"]["metrics"])
             await asyncio.to_thread(compose, "up", "-d", "--wait", "postgres")
             await eventually(healthy)
             assert (await client.get(path)).json()["version"] == 1

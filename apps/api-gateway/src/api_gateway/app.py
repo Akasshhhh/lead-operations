@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -15,6 +16,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
 from starlette.exceptions import HTTPException
 from starlette.responses import Response
+from voice_platform_config.observability import RequestTelemetry, Telemetry
 from voice_platform_contracts.conversation import (
     AgentMessageCreate,
     CallCreate,
@@ -45,6 +47,7 @@ from voice_platform_contracts.lead import (
     LeadUpdate,
     QualificationResponse,
 )
+from voice_platform_contracts.observability import OperationalOverview, OperationalSnapshot
 from voice_platform_contracts.qualification import (
     ProposedFacts,
     QualificationContext,
@@ -144,6 +147,7 @@ def create_app(
             await conversation_http_client.aclose()
 
     app = FastAPI(title="API Gateway", version="0.1.0", lifespan=lifespan)
+    telemetry = Telemetry("api-gateway")
     if voice_app is not None:
         app.mount("/voice", voice_app)
 
@@ -212,6 +216,32 @@ def create_app(
 
     def get_conversation_client(request: Request) -> ConversationServiceClient:
         return cast(ConversationServiceClient, request.app.state.conversation_client)
+
+    @app.get("/v1/observability", response_model=OperationalOverview)
+    async def operational_status(request: Request) -> OperationalOverview:
+        async def read(client: LeadServiceClient, service: str) -> OperationalSnapshot | None:
+            try:
+                snapshot = OperationalSnapshot.model_validate(
+                    await client.request("GET", "/v1/observability", request_id=request_id(request))
+                )
+                return snapshot if snapshot.service == service else None
+            except (
+                LeadServiceUnavailableError,
+                LeadServiceResponseError,
+                LeadServiceProtocolError,
+                ValidationError,
+            ):
+                return None
+
+        lead, conversation = await asyncio.gather(
+            read(get_client(request), "lead-service"),
+            read(get_conversation_client(request), "conversation-service"),
+        )
+        return OperationalOverview(
+            gateway=OperationalSnapshot.model_validate(telemetry.snapshot()),
+            lead=lead,
+            conversation=conversation,
+        )
 
     @app.get("/health")
     async def health(
@@ -647,6 +677,7 @@ def create_app(
         )
         return validate_response(TranscriptHistoryResponse, result)
 
+    app.add_middleware(RequestTelemetry, telemetry=telemetry)
     return app
 
 

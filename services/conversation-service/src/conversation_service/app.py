@@ -18,6 +18,7 @@ from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.responses import Response
 from voice_platform_config import SERVICE_TOKEN_HEADER, service_token_is_valid
+from voice_platform_config.observability import RequestTelemetry, Telemetry
 from voice_platform_config.settings import database_url_from_env
 from voice_platform_contracts.conversation import (
     AgentMessageCreate,
@@ -42,6 +43,7 @@ from voice_platform_contracts.dashboard import (
     ConversationListResponse,
 )
 from voice_platform_contracts.lead import LeadResponse, QualificationFact, QualificationUpdate
+from voice_platform_contracts.observability import OperationalSnapshot
 from voice_platform_contracts.qualification import (
     ProposedFacts,
     QualificationContext,
@@ -202,6 +204,15 @@ def create_app(
             await engine.dispose()
 
     app = FastAPI(title="Conversation Service", version="0.1.0", lifespan=lifespan)
+    telemetry = Telemetry("conversation-service")
+
+    @app.get(
+        "/v1/observability",
+        response_model=OperationalSnapshot,
+        dependencies=[Depends(verify_service_auth)],
+    )
+    async def operational_status() -> OperationalSnapshot:
+        return OperationalSnapshot.model_validate(telemetry.snapshot())
 
     @app.middleware("http")
     async def correlation_middleware(request: Request, call_next: Any) -> Response:
@@ -758,6 +769,7 @@ def create_app(
             next_after_sequence=page.next_after_sequence,
         )
 
+    app.add_middleware(RequestTelemetry, telemetry=telemetry)
     return app
 
 

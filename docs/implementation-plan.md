@@ -15,9 +15,9 @@ current module; advance after its verification and documentation gates pass.
 The remaining roadmap replaces the original 32-module plan. The goal is one
 demonstrable browser voice qualification product with provider failover, live
 Lead-owned qualification/scoring, and one central dashboard. Modules 1–7 are
-implemented and reverified; Modules 8–15 are implemented and verified below.
-Modules 16–18 remain planned. Module 15's approved dashboard read APIs and central
-frontend gates are complete; Module 16 is unstarted.
+implemented and reverified; Modules 8–16 are implemented and verified below.
+Modules 17–18 remain planned. Module 15 is committed as `3d6eab1` on top of
+`4ce9107`; Module 16 changes are uncommitted.
 
 1. Repository and development infrastructure
 2. PostgreSQL, migrations, and base domain models
@@ -1359,6 +1359,139 @@ their opt-in/build; skipped cases do not count as browser verification. For the
 deployed Module 12/14 command, also set `STACK_DASHBOARD_URL=http://localhost:3000`
 and `RUN_DASHBOARD_BROWSER_TESTS=1` to include the container Chrome read path.
 
-Module 15 is uncommitted on top of `4ce9107`; the user's Modules 12–14 commit is
-preserved. Stop here. Next is **Module 16 — Useful Observability + Failure Simulation**,
-requiring separate authorization.
+Module 15 was subsequently committed as `3d6eab1` on top of `4ce9107`.
+The following Module 16 work was explicitly authorized after repository inspection.
+
+## Module 16 — observability and failure simulation
+
+Inspected both main documents in full and reconciled against the clean `master`
+checkout at `3d6eab1`. The historical Module 15 “uncommitted” note was stale; its
+implementation was present in Git. No material architecture/contract conflict
+was found. Completed modules, schema, domain state machines, Lead-owned scoring,
+Conversation-owned persistence, outbox ordering and media recovery are preserved.
+
+### Measurements and contracts
+
+- Gateway, Lead and Conversation have bounded request metrics and structured JSON
+  operation logs: normalized `X-Request-ID`, method + route template, status,
+  outcome and duration. Query strings, concrete URL paths, request/response bodies,
+  transcript/audio, credentials and raw exception messages are excluded.
+- `GET /v1/observability` on Gateway aggregates its snapshot and authenticated
+  domain snapshots. Each unavailable/malformed domain snapshot independently
+  becomes `null`; diagnostics do not replace `/health` or prove DB readiness.
+  Domain copies of this endpoint require the existing service token. No DB query
+  is needed to read their request measurements, including during a DB outage.
+- Snapshots have `scope: process_local`, service, uptime, at most 128 operation
+  labels, and 32 recent operations. Metrics contain count, errors, total/max
+  duration in milliseconds. Dashboard computes mean duration from those counters.
+  Counters reset on process restart, are not fleet totals or durable domain truth,
+  and ordinary polling contributes to measurements.
+- Existing capability-protected `GET /voice/sessions/{sid}/status` adds
+  `diagnostics`, `faults_enabled`, `active_fault`. Provider attempts record duration,
+  provider, request/conversation/turn UUIDs (speech also has call UUID); runtime
+  HTTP spans and media/error/recovery signals are content-free. Existing provider
+  health remains authoritative for retry/failover/circuit status.
+- Relay and consumer logs retain event/aggregate identities and now include
+  request/trace IDs on failure/ACK; relay publication includes duration and still
+  logs success only after DB COMMIT. No new exporter, collector or tracing service.
+
+### Session fault contract
+
+`DEMO_FAULTS_ENABLED=0` is the default. Enable with `1` only in `APP_ENV=local`
+or `test`; other environments reject enabled fault configuration at startup.
+Compose forwards the flag to Gateway. No Docker control is exposed to the browser.
+
+`POST /voice/sessions/{sid}/faults` uses the existing session Bearer capability:
+
+```json
+{
+  "operation_id": "a-new-uuid-for-this-control-action",
+  "target": "llm",
+  "mode": "unavailable",
+  "attempts": 2,
+  "duration_seconds": 60
+}
+```
+
+Targets `llm`, `stt`, `tts` accept `unavailable` or `latency`; `dependency` accepts
+only `timeout`. Attempts are strict integers 1–10, TTL 1–60 seconds; extra fields
+are rejected. Unavailable fails before vendor dispatch; latency adds one second
+within the existing deadline. Only the first configured provider slot is faulted;
+routers retain their existing retries, fallback, partial-output rules and circuit
+cooldowns. Mock mode has one provider, so exhausting retries produces an error;
+two-slot failover is verified with the real router and fixture providers.
+
+Dependency timeout affects only the session's Conversation staged-turn `/apply`
+request, before dispatch, under the existing HTTP deadline. Recorded/bound input
+remains durable `PENDING`; no provisional score, schema write or new persistence
+path is introduced. After reset, **Recover operation** applies the saved facts once
+without replaying audio, re-extracting facts or generating an old agent reply.
+
+One active fault per session; a new operation replaces it. Reservations consume
+attempts before awaiting, and unconsumed faults expire. Identical operation-ID
+retries do not replenish TTL/attempts or rearm after reset/expiry. Changed reuse
+or more than 32 distinct control IDs per session returns 409; unsupported
+combinations/bounds return 422. Closed/ending sessions cannot arm. Missing/wrong
+capabilities, unknown sessions and disabled controls return 404.
+
+`DELETE /voice/sessions/{sid}/faults` clears active injection idempotently; it
+retains control receipts and provider circuit health. It stops new injections,
+not an already reserved attempt or an existing circuit cooldown. Dashboard exposes
+arm/reset, current fault, operational measurements and local **Disconnect media**;
+**Reconnect** preserves durable call/conversation identities. Interrupted speech
+is not automatically replayed. Provider/status measurements are ephemeral.
+
+### Failure demonstrations and verification
+
+Real process outages stay operator-controlled through the existing Compose tests:
+stop Redis to observe durable unpublished outbox attempts; stop/restart relay and
+restore Redis to observe publication; stop PostgreSQL to see correlated 503s,
+failed request counters and unchanged versions; stop Lead to see isolated missing
+snapshot/live scoring while durable transcript reads continue, then restore.
+Use `docker compose logs event-relay` for publication/worker signals and the
+dashboard event delivery view for durable delivery state. Fault controls do not
+pretend to simulate an actual database/Redis outage.
+
+Verification: **575 Python tests passed**, with one deployment-only case skipped
+in that run; existing real PostgreSQL/Redis, migrations, Chrome/WebRTC and new
+dashboard fault/reset/recovery/reconnect were included. **7 frontend Playwright
+tests passed**. Strict mypy (**122 source files**), Ruff lint/format (**146 files**),
+TypeScript/Prettier, production frontend build, host dependency and whitespace
+checks passed. Pipecat's existing audioop/importlib deprecation warnings remain.
+The old browser reconnect scenario now waits for durable agent output before
+reconnecting, since scoring completion precedes agent-output persistence and
+reconnect legitimately cancels unfinished output; its message-count assertion is
+preserved. The new fault test uses a precise status locator.
+
+Reproduction uses a dedicated migrated test DB, Node 22 and fixture audio, as in
+Module 15; replace its DB name with `module16_test`. For deployment verification:
+
+```bash
+POSTGRES_PORT=55432 REDIS_PORT=56379 API_GATEWAY_PORT=18000 \
+VOICE_RUNTIME_ENABLED=1 DEMO_FAULTS_ENABLED=1 LLM_MODE=mock SPEECH_MODE=mock \
+  docker compose up -d --build --wait
+
+POSTGRES_PORT=55432 REDIS_PORT=56379 API_GATEWAY_PORT=18000 \
+VOICE_RUNTIME_ENABLED=1 DEMO_FAULTS_ENABLED=1 RUN_EVENT_STACK_TESTS=1 \
+RUN_DASHBOARD_BROWSER_TESTS=1 STACK_DASHBOARD_URL=http://localhost:3000 \
+STACK_DATABASE_URL=postgresql+asyncpg://voice_ai:voice_ai_dev_password@localhost:55432/voice_ai \
+STACK_REDIS_URL=redis://localhost:56379/0 STACK_GATEWAY_URL=http://localhost:18000 \
+  .venv/bin/python -m pytest \
+  tests/integration/test_event_stack.py tests/integration/test_compose_conversation.py
+```
+
+**6 rebuilt Compose deployment tests passed**, including actual Redis/relay,
+PostgreSQL and Lead outages, correlated failed-request metrics while DB is down,
+independent missing Lead snapshot, voice capability/fault/reset/control-replay
+checks and production Next proxy/Chrome reads. Rebuilt Gateway and Conversation
+image dependency checks passed; deployed Alembic check reports no schema drift.
+All services were restored; Gateway health is 200, PostgreSQL/Redis are healthy,
+unpublished/exhausted outbox and dead-letter counts are zero. The disposable
+`module16_test` was removed. Local mock dashboard remains on port 3000, Gateway
+18000 with demo faults enabled; default configuration remains disabled.
+No new migration; head remains `e8f2a6b3c901`. Paid-provider human microphone
+quality/latency and Docker-to-browser UDP/NAT audio still require a live smoke
+test; fixture success does not establish those claims.
+
+Stop after Module 16. Next is **Module 17 — Evaluation and end-to-end testing**,
+requiring separate authorization. No evaluation harness or Module 17 scope added.
