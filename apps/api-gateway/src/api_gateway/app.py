@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any, cast
@@ -15,6 +16,7 @@ from pydantic import BaseModel, ValidationError
 from starlette.exceptions import HTTPException
 from starlette.responses import Response
 from voice_platform_contracts.conversation import (
+    AgentMessageCreate,
     CallCreate,
     CallResponse,
     CallTransition,
@@ -24,6 +26,7 @@ from voice_platform_contracts.conversation import (
     ConversationTransition,
     ConversationTurn,
     ConversationTurnResponse,
+    MessageHistoryEntry,
     MessageHistoryResponse,
     TranscriptHistoryResponse,
     TranscriptQuery,
@@ -36,6 +39,20 @@ from voice_platform_contracts.lead import (
     LeadResponse,
     LeadUpdate,
     QualificationResponse,
+)
+from voice_platform_contracts.qualification import (
+    ProposedFacts,
+    QualificationContext,
+    StagedTurnCreate,
+)
+from voice_platform_contracts.workflow import (
+    FollowUpResponse,
+    FollowUpTransition,
+    HandoffResponse,
+    HandoffTransition,
+    WorkflowActionCreate,
+    WorkflowActionResponse,
+    WorkflowSnapshot,
 )
 
 from .client import (
@@ -71,13 +88,24 @@ def create_app(
     """Create the Gateway with injectable settings and client for tests."""
 
     gateway_settings = settings or GatewaySettings.from_env()
+    voice_app: FastAPI | None = None
+    if os.getenv("VOICE_RUNTIME_ENABLED", "0") == "1":
+        from voice_platform_runtime.app import create_app as create_voice_app
+
+        voice_app = create_voice_app(
+            gateway_settings.conversation_service_url, gateway_settings.service_auth_token
+        )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if client is not None:
             app.state.lead_client = client
             app.state.conversation_client = conversation_client or client
-            yield
+            if voice_app is not None:
+                async with voice_app.router.lifespan_context(voice_app):
+                    yield
+            else:
+                yield
             return
 
         timeout = httpx.Timeout(gateway_settings.request_timeout_seconds)
@@ -101,12 +129,18 @@ def create_app(
             timeout_seconds=gateway_settings.request_timeout_seconds,
         )
         try:
-            yield
+            if voice_app is not None:
+                async with voice_app.router.lifespan_context(voice_app):
+                    yield
+            else:
+                yield
         finally:
             await http_client.aclose()
             await conversation_http_client.aclose()
 
     app = FastAPI(title="API Gateway", version="0.1.0", lifespan=lifespan)
+    if voice_app is not None:
+        app.mount("/voice", voice_app)
 
     @app.middleware("http")
     async def correlation_middleware(request: Request, call_next: Any) -> Response:
@@ -335,6 +369,181 @@ def create_app(
             payload=payload.model_dump(mode="json"),
         )
         return validate_response(ConversationTurnResponse, result)
+
+    @app.post(
+        "/v1/conversations/{conversation_id}/workflow-actions",
+        response_model=WorkflowActionResponse,
+    )
+    async def workflow_action(
+        conversation_id: UUID,
+        data: WorkflowActionCreate,
+        request: Request,
+        conversation_client: ConversationServiceClient = Depends(get_conversation_client),
+    ) -> WorkflowActionResponse:
+        result = await conversation_client.request(
+            "POST",
+            f"/v1/conversations/{conversation_id}/workflow-actions",
+            request_id=request_id(request),
+            json=data.model_dump(mode="json"),
+            expected_status=200,
+        )
+        return validate_response(WorkflowActionResponse, result)
+
+    @app.get(
+        "/v1/conversations/{conversation_id}/workflow-actions/{action_id}",
+        response_model=WorkflowActionResponse,
+    )
+    async def workflow_result(
+        conversation_id: UUID,
+        action_id: UUID,
+        request: Request,
+        conversation_client: ConversationServiceClient = Depends(get_conversation_client),
+    ) -> WorkflowActionResponse:
+        result = await conversation_client.request(
+            "GET",
+            f"/v1/conversations/{conversation_id}/workflow-actions/{action_id}",
+            request_id=request_id(request),
+        )
+        return validate_response(WorkflowActionResponse, result)
+
+    @app.get("/v1/conversations/{conversation_id}/workflows", response_model=WorkflowSnapshot)
+    async def workflows(
+        conversation_id: UUID,
+        request: Request,
+        conversation_client: ConversationServiceClient = Depends(get_conversation_client),
+    ) -> WorkflowSnapshot:
+        result = await conversation_client.request(
+            "GET", f"/v1/conversations/{conversation_id}/workflows", request_id=request_id(request)
+        )
+        return validate_response(WorkflowSnapshot, result)
+
+    @app.post(
+        "/v1/conversations/{conversation_id}/handoffs/{workflow_id}/transitions",
+        response_model=HandoffResponse,
+    )
+    async def handoff_transition(
+        conversation_id: UUID,
+        workflow_id: UUID,
+        data: HandoffTransition,
+        request: Request,
+        conversation_client: ConversationServiceClient = Depends(get_conversation_client),
+    ) -> HandoffResponse:
+        result = await conversation_client.request(
+            "POST",
+            f"/v1/conversations/{conversation_id}/handoffs/{workflow_id}/transitions",
+            request_id=request_id(request),
+            json=data.model_dump(mode="json"),
+            expected_status=200,
+        )
+        return validate_response(HandoffResponse, result)
+
+    @app.post(
+        "/v1/conversations/{conversation_id}/follow-ups/{workflow_id}/transitions",
+        response_model=FollowUpResponse,
+    )
+    async def follow_up_transition(
+        conversation_id: UUID,
+        workflow_id: UUID,
+        data: FollowUpTransition,
+        request: Request,
+        conversation_client: ConversationServiceClient = Depends(get_conversation_client),
+    ) -> FollowUpResponse:
+        result = await conversation_client.request(
+            "POST",
+            f"/v1/conversations/{conversation_id}/follow-ups/{workflow_id}/transitions",
+            request_id=request_id(request),
+            json=data.model_dump(mode="json"),
+            expected_status=200,
+        )
+        return validate_response(FollowUpResponse, result)
+
+    @app.get(
+        "/v1/conversations/{conversation_id}/qualification-context",
+        response_model=QualificationContext,
+    )
+    async def qualification_context(
+        conversation_id: UUID,
+        request: Request,
+        conversation_client: ConversationServiceClient = Depends(get_conversation_client),
+    ) -> QualificationContext:
+        result = await conversation_client.request(
+            "GET",
+            f"/v1/conversations/{conversation_id}/qualification-context",
+            request_id=request_id(request),
+        )
+        return validate_response(QualificationContext, result)
+
+    @app.post(
+        "/v1/conversations/{conversation_id}/staged-turns", response_model=MessageHistoryEntry
+    )
+    async def staged_input(
+        conversation_id: UUID,
+        data: StagedTurnCreate,
+        request: Request,
+        conversation_client: ConversationServiceClient = Depends(get_conversation_client),
+    ) -> MessageHistoryEntry:
+        result = await conversation_client.request(
+            "POST",
+            f"/v1/conversations/{conversation_id}/staged-turns",
+            request_id=request_id(request),
+            json=data.model_dump(mode="json"),
+            expected_status=200,
+        )
+        return validate_response(MessageHistoryEntry, result)
+
+    @app.post(
+        "/v1/conversations/{conversation_id}/staged-turns/{turn_id}/facts",
+        response_model=MessageHistoryEntry,
+    )
+    async def staged_facts(
+        conversation_id: UUID,
+        turn_id: UUID,
+        data: ProposedFacts,
+        request: Request,
+        conversation_client: ConversationServiceClient = Depends(get_conversation_client),
+    ) -> MessageHistoryEntry:
+        result = await conversation_client.request(
+            "POST",
+            f"/v1/conversations/{conversation_id}/staged-turns/{turn_id}/facts",
+            request_id=request_id(request),
+            json=data.model_dump(mode="json"),
+            expected_status=200,
+        )
+        return validate_response(MessageHistoryEntry, result)
+
+    @app.post(
+        "/v1/conversations/{conversation_id}/staged-turns/{turn_id}/apply",
+        response_model=ConversationTurnResponse,
+    )
+    async def staged_apply(
+        conversation_id: UUID,
+        turn_id: UUID,
+        request: Request,
+        conversation_client: ConversationServiceClient = Depends(get_conversation_client),
+    ) -> ConversationTurnResponse:
+        result = await conversation_client.request(
+            "POST",
+            f"/v1/conversations/{conversation_id}/staged-turns/{turn_id}/apply",
+            request_id=request_id(request),
+            expected_status=200,
+        )
+        return validate_response(ConversationTurnResponse, result)
+
+    @app.post(
+        "/v1/conversations/{conversation_id}/agent-messages", response_model=MessageHistoryEntry
+    )
+    async def record_agent_message(
+        request: Request,
+        conversation_id: UUID,
+        payload: AgentMessageCreate,
+        conversation_client: ConversationServiceClient = Depends(get_conversation_client),
+    ) -> MessageHistoryEntry:
+        result = await conversation_client.record_agent_message(
+            request_id=request_id(request),
+            conversation_id=conversation_id,
+            payload=payload.model_dump(mode="json"),
+        )
+        return validate_response(MessageHistoryEntry, result)
 
     @app.get("/v1/conversations/{conversation_id}/live-state", response_model=ConversationLiveState)
     async def live_state(

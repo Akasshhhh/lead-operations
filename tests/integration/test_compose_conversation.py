@@ -18,6 +18,8 @@ from voice_platform_db import create_session_factory
 from voice_platform_db.models import (
     Conversation,
     DomainEvent,
+    FollowUp,
+    Handoff,
     Lead,
     LeadScoreHistory,
     Message,
@@ -153,6 +155,96 @@ async def test_compose_gateway_conversation_live_turn() -> None:
                 assert recovered.json()["qualification"]["score"]["score"] == 20
                 assert recovered.json()["call"]["status"] == "CONNECTED"
                 assert recovered.json()["conversation"]["version"] == 5
+
+            agent_id = uuid4()
+            agent = {
+                "message_id": str(agent_id),
+                "call_id": str(call_id),
+                "parent_turn_id": pending_turn["turn_id"],
+                "expected_version": 5,
+                "text": "Thank you. Which country interests you?",
+                "provider": "voice-runtime",
+                "model": "deployment-test",
+            }
+            agent_path = f"/v1/conversations/{conversation_id}/agent-messages"
+            for version in (5, 1):
+                recorded = await client.post(
+                    agent_path,
+                    json=agent | {"expected_version": version},
+                    headers={"X-Request-ID": "compose-agent-test"},
+                )
+                assert recorded.status_code == 200, recorded.text
+                assert recorded.json()["id"] == str(agent_id)
+                assert recorded.json()["message_metadata"]["output_kind"] == "generated"
+            conflict = await client.post(agent_path, json=agent | {"text": "Changed output"})
+            assert conflict.status_code == 409
+            transcript = await client.get(
+                f"/v1/conversations/{conversation_id}/transcript", params={"speaker": "AGENT"}
+            )
+            assert transcript.status_code == 200, transcript.text
+            assert len(transcript.json()["items"]) == 1
+            assert transcript.json()["items"][0]["provider_segment_id"] == str(agent_id)
+
+            staged_id = str(uuid4())
+            staged_path = f"/v1/conversations/{conversation_id}/staged-turns"
+            staged_text = "I confirm my budget is ready."
+            staged = await client.post(
+                staged_path,
+                json={
+                    "turn_id": staged_id,
+                    "call_id": str(call_id),
+                    "expected_version": 5,
+                    "user_text": staged_text,
+                },
+            )
+            assert staged.status_code == 200, staged.text
+            assert staged.json()["turn_status"] == "PENDING"
+            bound = await client.post(
+                f"{staged_path}/{staged_id}/facts",
+                json={
+                    "provider": "mock",
+                    "model": "deployment-test",
+                    "proposals": [
+                        {
+                            "field_key": "budget_ready",
+                            "value": True,
+                            "evidence": staged_text,
+                        }
+                    ],
+                },
+            )
+            assert bound.status_code == 200, bound.text
+            for _ in range(2):
+                applied = await client.post(f"{staged_path}/{staged_id}/apply")
+                assert applied.status_code == 200, applied.text
+                assert applied.json()["qualification"]["score"]["score"] == 30
+            context = await client.get(f"/v1/conversations/{conversation_id}/qualification-context")
+            assert context.status_code == 200, context.text
+            assert "budget_ready" not in context.json()["plan"]["missing_fields"]
+
+            if os.getenv("VOICE_RUNTIME_ENABLED") == "1":
+                page = await client.get("/voice/")
+                assert page.status_code == 200 and "Browser voice test" in page.text
+                created_voice = await client.post(
+                    "/voice/sessions",
+                    json={
+                        "conversation_id": str(conversation_id),
+                        "call_id": str(call_id),
+                        "manual_turns": True,
+                    },
+                )
+                assert created_voice.status_code == 200, created_voice.text
+                media = created_voice.json()
+                media_path = f"/voice/sessions/{media['session_id']}"
+                assert (await client.delete(media_path)).status_code == 404
+                ended_voice = await client.delete(
+                    media_path, headers={"Authorization": "Bearer " + media["token"]}
+                )
+                assert ended_voice.status_code == 200, ended_voice.text
+                business = await client.get(f"/v1/conversations/{conversation_id}")
+                assert business.json()["state"] == "QUALIFICATION"
+                assert business.json()["version"] == 5
+
             async with sessions() as session:
                 assert (
                     await session.scalar(
@@ -160,15 +252,67 @@ async def test_compose_gateway_conversation_live_turn() -> None:
                         .select_from(LeadScoreHistory)
                         .where(LeadScoreHistory.lead_id == lead_id)
                     )
-                    == 2
+                    == 3
                 )
+
+            if os.getenv("VOICE_RUNTIME_ENABLED") == "1":
+                call = await client.post(f"/v1/conversations/{conversation_id}/calls", json={})
+                assert call.status_code == 201, call.text
+                call_id = UUID(call.json()["id"])
+                for version, status in ((1, "CONNECTING"), (2, "CONNECTED")):
+                    connected = await client.post(
+                        f"/v1/conversations/{conversation_id}/calls/{call_id}/transitions",
+                        json={"expected_version": version, "target_status": status},
+                    )
+                    assert connected.status_code == 200
+            current = (await client.get(f"/v1/conversations/{conversation_id}")).json()
+            request_text = "Can I speak to a human?"
+            requested = await client.post(
+                f"/v1/conversations/{conversation_id}/turns",
+                json={
+                    "turn_id": str(uuid4()),
+                    "call_id": str(call_id),
+                    "expected_version": current["version"],
+                    "user_text": request_text,
+                    "facts": [],
+                },
+            )
+            assert requested.status_code == 200, requested.text
+            action = {
+                "action_id": str(uuid4()),
+                "turn_id": requested.json()["message_id"],
+                "call_id": str(call_id),
+                "expected_version": requested.json()["conversation"]["version"],
+                "action": "HUMAN_HANDOFF",
+                "evidence": request_text,
+                "provider": "mock",
+                "model": "deployed-test",
+            }
+            for _ in range(2):
+                acted = await client.post(
+                    f"/v1/conversations/{conversation_id}/workflow-actions", json=action
+                )
+                assert acted.status_code == 200, acted.text
+                assert acted.json()["conversation"]["state"] == "HUMAN_HANDOFF"
+                assert acted.json()["acknowledgement"]["text"].startswith("Your request")
+            workflows = await client.get(f"/v1/conversations/{conversation_id}/workflows")
+            assert workflows.status_code == 200 and len(workflows.json()["handoffs"]) == 1
+            cancelled = await client.post(
+                f"/v1/conversations/{conversation_id}/handoffs/{action['action_id']}/transitions",
+                json={
+                    "operation_id": str(uuid4()),
+                    "expected_status": "REQUESTED",
+                    "target_status": "CANCELLED",
+                },
+            )
+            assert cancelled.status_code == 200, cancelled.text
 
             async def published() -> bool:
                 async with sessions() as session:
                     return bool(
                         await session.scalar(
                             select(DomainEvent.event_id).where(
-                                DomainEvent.aggregate_id == conversation_id,
+                                DomainEvent.aggregate_id == UUID(action["action_id"]),
                                 DomainEvent.published_at.is_not(None),
                             )
                         )
@@ -181,6 +325,25 @@ async def test_compose_gateway_conversation_live_turn() -> None:
         }
         async with sessions.begin() as session:
             if conversation_id is not None:
+                workflow_event_ids = list(
+                    await session.scalars(
+                        select(DomainEvent.aggregate_id).where(
+                            DomainEvent.payload["conversation_id"].astext == str(conversation_id)
+                        )
+                    )
+                )
+                aggregate_ids.update(workflow_event_ids)
+                await session.execute(
+                    delete(DomainEvent).where(
+                        DomainEvent.payload["conversation_id"].astext == str(conversation_id)
+                    )
+                )
+                await session.execute(
+                    delete(Handoff).where(Handoff.conversation_id == conversation_id)
+                )
+                await session.execute(
+                    delete(FollowUp).where(FollowUp.conversation_id == conversation_id)
+                )
                 message_ids = list(
                     await session.scalars(
                         select(Message.id).where(Message.conversation_id == conversation_id)

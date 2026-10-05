@@ -22,8 +22,14 @@ from voice_platform_config import SERVICE_TOKEN_HEADER, service_token_is_valid
 from voice_platform_config.service_auth import validate_service_auth
 from voice_platform_config.settings import database_url_from_env
 from voice_platform_contracts.http import normalize_request_id
+from voice_platform_contracts.qualification import (
+    QualificationPlan,
+    ValidatedFacts,
+    ValidateProposals,
+)
 from voice_platform_db import create_async_engine, create_session_factory
 
+from .qualification import qualification_plan, validate_proposals
 from .schemas import (
     HealthResponse,
     LeadCreate,
@@ -279,6 +285,36 @@ def create_app(
                 else None
             ),
         )
+
+    @app.get(
+        "/v1/leads/{lead_id}/qualification/plan",
+        response_model=QualificationPlan,
+        dependencies=[Depends(verify_service_auth)],
+    )
+    async def get_plan(
+        lead_id: UUID, session: AsyncSession = Depends(get_session, scope="function")
+    ) -> QualificationPlan:
+        return qualification_plan(await get_qualification(lead_id, session))
+
+    @app.post(
+        "/v1/leads/{lead_id}/qualification/validate",
+        response_model=ValidatedFacts,
+        dependencies=[Depends(verify_service_auth)],
+    )
+    async def validate_facts(
+        lead_id: UUID,
+        data: ValidateProposals,
+        session: AsyncSession = Depends(get_session, scope="function"),
+    ) -> ValidatedFacts:
+        current = await LeadService(session).get_qualification(lead_id)
+        answers = {answer.field_key: answer for answer in current.answers}
+        for proposal in data.proposals:
+            if proposal.resolve_conflict and (
+                proposal.field_key not in answers
+                or answers[proposal.field_key].answer_status != "CONTRADICTORY"
+            ):
+                raise QualificationValidationError(proposal.field_key)
+        return validate_proposals(data)
 
     @app.post(
         "/v1/leads/{lead_id}/qualification/updates",

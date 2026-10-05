@@ -10,6 +10,11 @@ import httpx
 from pydantic import ValidationError
 from voice_platform_config import SERVICE_TOKEN_HEADER
 from voice_platform_contracts.lead import QualificationResponse, QualificationUpdate
+from voice_platform_contracts.qualification import (
+    QualificationPlan,
+    ValidatedFacts,
+    ValidateProposals,
+)
 
 
 class LeadServiceUnavailableError(RuntimeError):
@@ -99,3 +104,29 @@ class LeadServiceClient:
     async def get_lead(self, *, lead_id: UUID, request_id: str) -> dict[str, Any]:
         payload = await self.request("GET", f"/v1/leads/{lead_id}", request_id=request_id)
         return cast(dict[str, Any], payload)
+
+    async def plan(self, lead_id: UUID, request_id: str) -> QualificationPlan:
+        payload = await self.request(
+            "GET", f"/v1/leads/{lead_id}/qualification/plan", request_id=request_id
+        )
+        try:
+            result = QualificationPlan.model_validate(payload)
+        except ValidationError:
+            raise LeadServiceUnavailableError("invalid qualification plan") from None
+        if result.qualification.lead_id != lead_id:
+            raise LeadServiceUnavailableError("invalid qualification plan identity")
+        return result
+
+    async def validate(
+        self, lead_id: UUID, data: ValidateProposals, request_id: str
+    ) -> ValidatedFacts:
+        payload = await self.request(
+            "POST",
+            f"/v1/leads/{lead_id}/qualification/validate",
+            request_id=request_id,
+            json=data.model_dump(mode="json"),
+        )
+        try:
+            return ValidatedFacts.model_validate(payload)
+        except ValidationError:
+            raise LeadServiceUnavailableError("invalid fact validation") from None

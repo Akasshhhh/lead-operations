@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Literal, Self
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
 from .lead import QualificationFact, QualificationResponse
 
@@ -86,6 +86,31 @@ class ConversationTurn(BaseModel):
         if len(keys) != len(set(keys)):
             raise ValueError("each qualification field may occur only once per turn")
         return self
+
+
+class AgentMessageCreate(BaseModel):
+    """Completed generated output; persistence does not claim browser playback."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    message_id: UUID
+    call_id: UUID
+    expected_version: int = Field(ge=1, strict=True)
+    parent_turn_id: UUID | None = None
+    text: str = Field(min_length=1, max_length=20_000)
+    provider: str = Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9_-]+$")
+    model: str = Field(min_length=1, max_length=128)
+
+    @field_validator("text", "model")
+    @classmethod
+    def valid_text(cls, value: str) -> str:
+        if "\x00" in value:
+            raise ValueError("NUL is not supported")
+        try:
+            value.encode("utf-8")
+        except UnicodeError:
+            raise ValueError("invalid UTF-8") from None
+        return value
 
 
 class ConversationResponse(BaseModel):

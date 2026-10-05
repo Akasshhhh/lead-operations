@@ -11,6 +11,7 @@ from voice_platform_config.settings import database_url_from_env
 from voice_platform_db import create_async_engine, create_session_factory
 
 from .service import ConversationService
+from .workflow import dispatch_followups
 
 
 def parse_timestamp(value: str) -> datetime:
@@ -51,6 +52,17 @@ async def retention(args: argparse.Namespace) -> None:
         await engine.dispose()
 
 
+async def followups(args: argparse.Namespace) -> None:
+    engine = create_async_engine(database_url_from_env())
+    try:
+        result = await dispatch_followups(
+            create_session_factory(engine), batch_size=args.batch_size
+        )
+        print(result.model_dump_json())
+    finally:
+        await engine.dispose()
+
+
 def cli() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -59,9 +71,15 @@ def cli() -> None:
     command.add_argument("--reason", default="retention")
     command.add_argument("--batch-size", type=int, default=500)
     command.add_argument("--dry-run", action="store_true")
+    command = commands.add_parser(
+        "dispatch-follow-ups", help="One bounded pass of due demo reminders"
+    )
+    command.add_argument("--batch-size", type=int, default=50)
     args = parser.parse_args()
     if args.command == "retention":
         asyncio.run(retention(args))
+    elif args.command == "dispatch-follow-ups":
+        asyncio.run(followups(args))
 
 
 if __name__ == "__main__":

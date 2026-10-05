@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Browser voice test</title>
+<style>body{font:16px system-ui;max-width:760px;margin:40px auto;padding:0 20px;background:#f4f6f8;color:#152334}label{display:block;margin:12px 0}input{width:100%;box-sizing:border-box;padding:10px}button{padding:10px 16px;margin:4px}pre{white-space:pre-wrap;background:white;padding:16px;min-height:160px}small{display:block;color:#526171}</style>
+<h1>Browser voice test</h1><p>Connect an existing conversation and call, or create them from a synthetic lead.</p>
+<small>Mock mode emits fixture transcripts and tones; it does not recognize or speak. Real mode uses configured server providers. Microphone access requires localhost or HTTPS.</small>
+<label>Lead ID (for creation)<input id="lead" placeholder="Existing synthetic lead UUID"></label>
+<button id="create">Create conversation and call</button>
+<label>Conversation ID<input id="conversation"></label><label>Call ID<input id="call"></label>
+<label><input id="manual" type="checkbox" checked style="width:auto"> Push-to-talk (uncheck for automatic voice activity detection)</label>
+<button id="connect">Connect microphone</button><button id="talk" disabled>Start speaking</button><button id="retry" disabled>Retry saved operation</button><button id="reconnect" disabled>Reconnect</button><button id="end" disabled>End call</button>
+<audio id="audio" autoplay controls></audio><pre id="log" role="log" aria-live="polite"></pre>
+<script>
+let session, pc, channel, mic, pcId, speaking=false;
+const el=id=>document.getElementById(id);
+const log=value=>{el('log').textContent+=value+'\n';};
+async function json(url,method='GET',body,authenticated=false){
+ const headers={'Content-Type':'application/json'};
+ if(authenticated)headers.Authorization='Bearer '+session.token;
+ const response=await fetch(url,{method,headers,body:body===undefined?undefined:JSON.stringify(body)});
+ const result=await response.json();if(!response.ok)throw Error('Request failed ('+response.status+')');return result;
+}
+function base(){return '/voice/sessions/'+session.session_id;}
+async function negotiate(restart=false){
+ if(pc)pc.close();
+ pc=new RTCPeerConnection({iceServers:[]});
+ for(const track of mic.getTracks())pc.addTrack(track,mic);
+ channel=pc.createDataChannel('chat');
+ channel.onmessage=event=>{try{const msg=JSON.parse(event.data);if(msg.type==='signalling')return;log(JSON.stringify(msg));}catch{log('Invalid server message');}};
+ pc.ontrack=event=>{el('audio').srcObject=event.streams[0]||new MediaStream([event.track]);el('audio').play().catch(()=>log('Press audio play to enable sound'));};
+ pc.onconnectionstatechange=()=>log('Media: '+pc.connectionState);
+ await pc.setLocalDescription(await pc.createOffer());
+ if(pc.iceGatheringState!=='complete')await new Promise((resolve,reject)=>{const timeout=setTimeout(()=>reject(Error('ICE gathering timeout')),10000);pc.addEventListener('icegatheringstatechange',()=>{if(pc.iceGatheringState==='complete'){clearTimeout(timeout);resolve();}});});
+ const answer=await json(base()+'/offer','POST',{sdp:pc.localDescription.sdp,type:'offer',pc_id:restart?pcId:null,restart_pc:restart},true);
+ pcId=answer.pc_id;await pc.setRemoteDescription({sdp:answer.sdp,type:answer.type});
+}
+function action(id,fn){el(id).onclick=async()=>{el(id).disabled=true;try{await fn();}catch(e){log(e.message);}finally{el(id).disabled=['talk','retry','reconnect','end'].includes(id)&&!session;}};}
+action('create',async()=>{const conv=await json('/v1/conversations','POST',{lead_id:el('lead').value.trim()});el('conversation').value=conv.id;const call=await json('/v1/conversations/'+conv.id+'/calls','POST',{transport:'WEBRTC'});el('call').value=call.id;log('Created conversation and call');});
+action('connect',async()=>{if(session)throw Error('End the current session before connecting again');mic=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true},video:false});try{session=await json('/voice/sessions','POST',{conversation_id:el('conversation').value.trim(),call_id:el('call').value.trim(),manual_turns:el('manual').checked});log('Speech: '+session.speech_mode+'; LLM: '+session.llm_mode);await negotiate();for(const id of ['talk','retry','reconnect','end'])el(id).disabled=false;}catch(e){mic.getTracks().forEach(t=>t.stop());if(session){el('end').disabled=false;el('reconnect').disabled=false;}throw e;}});
+action('talk',async()=>{if(!el('manual').checked)throw Error('Automatic voice activity detection is enabled');if(channel?.readyState!=='open')throw Error('Media is not ready');speaking=!speaking;channel.send(JSON.stringify({type:speaking?'start':'stop'}));el('talk').textContent=speaking?'Stop speaking':'Start speaking';});
+action('retry',async()=>{log(JSON.stringify(await json(base()+'/retry','POST',undefined,true)));});
+action('reconnect',async()=>{if(!mic.getTracks().some(t=>t.readyState==='live'))mic=await navigator.mediaDevices.getUserMedia({audio:true,video:false});speaking=false;el('talk').textContent='Start speaking';await negotiate(true);});
+action('end',async()=>{const result=await json(base(),'DELETE',undefined,true);log(JSON.stringify(result));pc?.close();mic?.getTracks().forEach(t=>t.stop());session=null;pcId=null;for(const id of ['talk','retry','reconnect','end'])el(id).disabled=true;});
+window.addEventListener('pagehide',()=>{pc?.close();mic?.getTracks().forEach(t=>t.stop());});
+</script></html>

@@ -174,6 +174,17 @@ class ConversationServiceClient(LeadServiceClient):
             expected_status=200,
         )
 
+    async def record_agent_message(
+        self, *, request_id: str, conversation_id: UUID, payload: object
+    ) -> Any:
+        return await self.request(
+            "POST",
+            f"/v1/conversations/{conversation_id}/agent-messages",
+            request_id=request_id,
+            json=payload,
+            expected_status=200,
+        )
+
     async def live_state(self, *, request_id: str, conversation_id: UUID) -> Any:
         return await self.request(
             "GET", f"/v1/conversations/{conversation_id}/live-state", request_id=request_id

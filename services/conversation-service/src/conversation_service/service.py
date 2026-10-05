@@ -14,6 +14,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from voice_platform_contracts.conversation import (
+    AgentMessageCreate,
     CallCreate,
     CallTransition,
     ConversationCreate,
@@ -352,6 +353,124 @@ class ConversationService:
         )
         await self.session.flush()
         return TurnPersistence(conversation=conversation, call=call, message=message)
+
+    async def persist_agent_message(
+        self, conversation_id: UUID, data: AgentMessageCreate
+    ) -> Message:
+        """Append generated text atomically; no qualification or state advancement."""
+        conversation = await self.get_conversation(conversation_id, lock=True)
+        payload = data.model_dump(mode="json", exclude={"expected_version"})
+        request_hash = self._content_hash(json.dumps(payload, sort_keys=True))
+        existing = await self.session.get(
+            Message, data.message_id, with_for_update=True, populate_existing=True
+        )
+        if existing is not None:
+            recorded = await self.session.scalar(
+                select(DomainEvent).where(
+                    DomainEvent.idempotency_key == f"conversation.agent.recorded:{data.message_id}"
+                )
+            )
+            receipt = recorded.payload if recorded is not None else None
+            if (
+                existing.conversation_id != conversation_id
+                or existing.call_id != data.call_id
+                or existing.speaker != "AGENT"
+                or not isinstance(receipt, dict)
+                or receipt.get("request_hash") != request_hash
+            ):
+                raise TurnConflictError(str(data.message_id))
+            return existing
+        if conversation.version != data.expected_version:
+            raise ConversationVersionConflictError(str(conversation_id))
+        if conversation.state not in {
+            "GREETING",
+            "DISCOVERY",
+            "QUALIFICATION",
+            "SCORING",
+            "DECISION",
+        }:
+            raise TurnConflictError("agent output requires an active conversation")
+        call = await self.get_call(conversation_id, data.call_id, lock=True)
+        if call.status != "CONNECTED":
+            raise TurnCallNotConnectedError(str(data.call_id))
+        pending = await self.session.scalar(
+            select(Message.id)
+            .where(Message.conversation_id == conversation_id, Message.turn_status == "PENDING")
+            .limit(1)
+        )
+        if pending is not None:
+            raise TurnConflictError("recover the pending user turn before recording agent output")
+        if data.parent_turn_id is None:
+            if conversation.state != "GREETING":
+                raise TurnConflictError("agent replies require a parent user turn")
+        else:
+            latest = await self.session.scalar(
+                select(Message)
+                .where(Message.conversation_id == conversation_id, Message.speaker == "USER")
+                .order_by(Message.sequence_number.desc())
+                .limit(1)
+            )
+            if (
+                latest is None
+                or latest.id != data.parent_turn_id
+                or latest.call_id != data.call_id
+                or latest.turn_status != "APPLIED"
+            ):
+                raise TurnConflictError("agent reply requires the latest applied user turn")
+        max_sequence = await self.session.scalar(
+            select(func.max(Message.sequence_number)).where(
+                Message.conversation_id == conversation_id
+            )
+        )
+        sequence = int(max_sequence or 0) + 1
+        metadata = {
+            "output_kind": "generated",
+            "parent_turn_id": str(data.parent_turn_id) if data.parent_turn_id else None,
+        }
+        message = Message(
+            id=data.message_id,
+            conversation_id=conversation_id,
+            call_id=data.call_id,
+            speaker="AGENT",
+            text=data.text,
+            sequence_number=sequence,
+            provider=data.provider,
+            model=data.model,
+            turn_status="APPLIED",
+            message_metadata=metadata,
+        )
+        self.session.add(message)
+        self.session.add(
+            TranscriptSegment(
+                conversation_id=conversation_id,
+                call_id=data.call_id,
+                speaker="AGENT",
+                text=data.text,
+                segment_type="FINAL",
+                sequence_number=sequence,
+                is_final=True,
+                provider=data.provider,
+                provider_segment_id=str(data.message_id),
+                segment_metadata=metadata,
+            )
+        )
+        self._event(
+            event_type="conversation.agent.recorded",
+            aggregate_type="message",
+            aggregate_id=data.message_id,
+            aggregate_version=1,
+            idempotency_key=f"conversation.agent.recorded:{data.message_id}",
+            payload={
+                "conversation_id": str(conversation_id),
+                "call_id": str(data.call_id),
+                "message_id": str(data.message_id),
+                "sequence_number": sequence,
+                "speaker": "AGENT",
+                "request_hash": request_hash,
+            },
+        )
+        await self.session.flush()
+        return message
 
     async def mark_turn_pending(
         self, conversation_id: UUID, turn_id: UUID, error: Exception, *, rejected: bool = False

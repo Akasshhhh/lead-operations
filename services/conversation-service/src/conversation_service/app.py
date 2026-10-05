@@ -12,6 +12,7 @@ import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -19,6 +20,7 @@ from starlette.responses import Response
 from voice_platform_config import SERVICE_TOKEN_HEADER, service_token_is_valid
 from voice_platform_config.settings import database_url_from_env
 from voice_platform_contracts.conversation import (
+    AgentMessageCreate,
     CallCreate,
     CallResponse,
     CallTransition,
@@ -34,10 +36,30 @@ from voice_platform_contracts.conversation import (
     TranscriptHistoryResponse,
     TranscriptQuery,
 )
+from voice_platform_contracts.lead import LeadResponse, QualificationFact, QualificationUpdate
+from voice_platform_contracts.qualification import (
+    ProposedFacts,
+    QualificationContext,
+    StagedTurnCreate,
+    ValidateProposals,
+)
+from voice_platform_contracts.workflow import (
+    AgentOutputCheck,
+    AgentOutputDecision,
+    FollowUpResponse,
+    FollowUpTransition,
+    HandoffResponse,
+    HandoffTransition,
+    WorkflowActionCreate,
+    WorkflowActionResponse,
+    WorkflowSnapshot,
+)
 from voice_platform_db import create_async_engine, create_session_factory
 from voice_platform_db.models import Message
 
 from .client import LeadServiceClient, LeadServiceResponseError, LeadServiceUnavailableError
+from .policy import WorkflowPolicyError
+from .responses import message_response as _message_response
 from .service import (
     ActiveCallError,
     ActiveConversationError,
@@ -49,6 +71,8 @@ from .service import (
     TurnConflictError,
 )
 from .settings import ConversationSettings
+from .staged import StagedTurns
+from .workflow import WorkflowService
 
 
 def _conversation_response(conversation: Any) -> ConversationResponse:
@@ -61,27 +85,6 @@ def _call_response(call: Any) -> CallResponse:
 
 def _json_object(value: object) -> dict[str, Any]:
     return cast(dict[str, Any], value) if isinstance(value, dict) else {}
-
-
-def _message_response(message: Any) -> MessageHistoryEntry:
-    return MessageHistoryEntry(
-        id=message.id,
-        conversation_id=message.conversation_id,
-        call_id=message.call_id,
-        speaker=message.speaker,
-        text=message.text,
-        sequence_number=message.sequence_number,
-        provider=message.provider,
-        model=message.model,
-        message_metadata=_json_object(message.message_metadata),
-        turn_status=message.turn_status,
-        qualification_error=message.qualification_error,
-        redacted=message.redacted_at is not None,
-        redacted_at=message.redacted_at,
-        redaction_reason=message.redaction_reason,
-        content_sha256=message.content_sha256,
-        created_at=message.created_at,
-    )
 
 
 def _segment_response(segment: Any) -> TranscriptHistoryEntry:
@@ -240,6 +243,10 @@ def create_app(
     async def lead_unavailable(_: Request, __: LeadServiceUnavailableError) -> JSONResponse:
         return JSONResponse(status_code=503, content={"detail": "lead service unavailable"})
 
+    @app.exception_handler(WorkflowPolicyError)
+    async def policy_error(_: Request, exc: WorkflowPolicyError) -> JSONResponse:
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
+
     @app.exception_handler(LeadServiceResponseError)
     async def lead_error(_: Request, exc: LeadServiceResponseError) -> JSONResponse:
         return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
@@ -249,6 +256,95 @@ def create_app(
 
     def request_id(request: Request) -> str:
         return cast(str, request.state.request_id)
+
+    @app.post(
+        "/v1/conversations/{conversation_id}/workflow-actions",
+        response_model=WorkflowActionResponse,
+        dependencies=[Depends(verify_service_auth)],
+    )
+    async def workflow_action(
+        conversation_id: UUID,
+        data: WorkflowActionCreate,
+        request: Request,
+        session: AsyncSession = Depends(get_session),
+    ) -> WorkflowActionResponse:
+        async with session.begin():
+            result = await WorkflowService(session, request_id=request_id(request)).execute(
+                conversation_id, data
+            )
+        return result
+
+    @app.get(
+        "/v1/conversations/{conversation_id}/workflow-actions/{action_id}",
+        response_model=WorkflowActionResponse,
+        dependencies=[Depends(verify_service_auth)],
+    )
+    async def workflow_result(
+        conversation_id: UUID,
+        action_id: UUID,
+        session: AsyncSession = Depends(get_session),
+    ) -> WorkflowActionResponse:
+        return await WorkflowService(session).result(conversation_id, action_id)
+
+    @app.get(
+        "/v1/conversations/{conversation_id}/workflows",
+        response_model=WorkflowSnapshot,
+        dependencies=[Depends(verify_service_auth)],
+    )
+    async def workflows(
+        conversation_id: UUID,
+        session: AsyncSession = Depends(get_session),
+    ) -> WorkflowSnapshot:
+        return await WorkflowService(session).snapshot(conversation_id)
+
+    @app.post(
+        "/v1/conversations/{conversation_id}/output-policy",
+        response_model=AgentOutputDecision,
+        dependencies=[Depends(verify_service_auth)],
+    )
+    async def output_policy(
+        conversation_id: UUID,
+        data: AgentOutputCheck,
+        session: AsyncSession = Depends(get_session),
+    ) -> AgentOutputDecision:
+        async with session.begin():
+            return await WorkflowService(session).output_check(conversation_id, data)
+
+    @app.post(
+        "/v1/conversations/{conversation_id}/handoffs/{workflow_id}/transitions",
+        response_model=HandoffResponse,
+        dependencies=[Depends(verify_service_auth)],
+    )
+    async def handoff_transition(
+        conversation_id: UUID,
+        workflow_id: UUID,
+        data: HandoffTransition,
+        request: Request,
+        session: AsyncSession = Depends(get_session),
+    ) -> HandoffResponse:
+        async with session.begin():
+            result = await WorkflowService(session, request_id=request_id(request)).transition(
+                conversation_id, workflow_id, data
+            )
+        return cast(HandoffResponse, result)
+
+    @app.post(
+        "/v1/conversations/{conversation_id}/follow-ups/{workflow_id}/transitions",
+        response_model=FollowUpResponse,
+        dependencies=[Depends(verify_service_auth)],
+    )
+    async def follow_up_transition(
+        conversation_id: UUID,
+        workflow_id: UUID,
+        data: FollowUpTransition,
+        request: Request,
+        session: AsyncSession = Depends(get_session),
+    ) -> FollowUpResponse:
+        async with session.begin():
+            result = await WorkflowService(session, request_id=request_id(request)).transition(
+                conversation_id, workflow_id, data
+            )
+        return cast(FollowUpResponse, result)
 
     @app.get("/health", dependencies=[Depends(verify_service_auth)])
     async def health(session: AsyncSession = Depends(get_session)) -> dict[str, str]:
@@ -399,6 +495,159 @@ def create_app(
             qualification=qualification,
             next_action=conversation.next_action,
         )
+
+    @app.get(
+        "/v1/conversations/{conversation_id}/qualification-context",
+        response_model=QualificationContext,
+        dependencies=[Depends(verify_service_auth)],
+    )
+    async def qualification_context(
+        conversation_id: UUID,
+        request: Request,
+        session: AsyncSession = Depends(get_session),
+        lead: LeadServiceClient = Depends(client),
+    ) -> QualificationContext:
+        async with session.begin():
+            current = await ConversationService(session).get_conversation(conversation_id)
+        plan = await lead.plan(current.lead_id, request_id(request))
+        try:
+            profile = LeadResponse.model_validate(
+                await lead.get_lead(lead_id=current.lead_id, request_id=request_id(request))
+            )
+        except ValidationError:
+            raise LeadServiceUnavailableError("invalid lead profile") from None
+        if profile.id != current.lead_id:
+            raise LeadServiceUnavailableError("invalid lead identity")
+        return QualificationContext(lead=profile, plan=plan)
+
+    @app.post(
+        "/v1/conversations/{conversation_id}/staged-turns",
+        response_model=MessageHistoryEntry,
+        dependencies=[Depends(verify_service_auth)],
+    )
+    async def record_input(
+        conversation_id: UUID,
+        data: StagedTurnCreate,
+        request: Request,
+        session: AsyncSession = Depends(get_session),
+    ) -> MessageHistoryEntry:
+        async with session.begin():
+            message = await StagedTurns(session, request_id=request_id(request)).input(
+                conversation_id, data
+            )
+        return _message_response(message)
+
+    @app.post(
+        "/v1/conversations/{conversation_id}/staged-turns/{turn_id}/facts",
+        response_model=MessageHistoryEntry,
+        dependencies=[Depends(verify_service_auth)],
+    )
+    async def bind_input_facts(
+        conversation_id: UUID,
+        turn_id: UUID,
+        data: ProposedFacts,
+        request: Request,
+        session: AsyncSession = Depends(get_session),
+        lead: LeadServiceClient = Depends(client),
+    ) -> MessageHistoryEntry:
+        service = StagedTurns(session, request_id=request_id(request))
+        async with session.begin():
+            existing = await service.bound(conversation_id, turn_id, data)
+            if existing is not None:
+                return _message_response(existing)
+            message = await service.message(conversation_id, turn_id)
+            current = await service.get_conversation(conversation_id)
+        # Validation has no side effects. Re-lock and compare the receipt after HTTP.
+        validated = await lead.validate(
+            current.lead_id,
+            ValidateProposals(**data.model_dump(), user_text=message.text),
+            request_id(request),
+        )
+        async with session.begin():
+            message = await service.bind(conversation_id, turn_id, data, validated)
+        return _message_response(message)
+
+    @app.post(
+        "/v1/conversations/{conversation_id}/staged-turns/{turn_id}/apply",
+        response_model=ConversationTurnResponse,
+        dependencies=[Depends(verify_service_auth)],
+    )
+    async def apply_input(
+        conversation_id: UUID,
+        turn_id: UUID,
+        request: Request,
+        session: AsyncSession = Depends(get_session),
+        lead: LeadServiceClient = Depends(client),
+    ) -> ConversationTurnResponse:
+        service = StagedTurns(session, request_id=request_id(request))
+        async with session.begin():
+            message = await service.message(conversation_id, turn_id)
+            current = await service.get_conversation(conversation_id)
+            if message.turn_status == "FAILED":
+                raise TurnConflictError("rejected staged turn")
+            metadata = _json_object(message.message_metadata)
+            if message.turn_status != "APPLIED" and metadata.get("stage") != "BOUND":
+                raise TurnConflictError("bind validated facts before application")
+            facts = [
+                QualificationFact.model_validate(item)
+                for item in metadata.get("qualification_facts", [])
+            ]
+        try:
+            qualification = await lead.get_qualification(
+                lead_id=current.lead_id, request_id=request_id(request)
+            )
+            if message.turn_status != "APPLIED" and facts:
+                qualification = await lead.update_qualification(
+                    lead_id=current.lead_id,
+                    request_id=request_id(request),
+                    data=QualificationUpdate(
+                        conversation_id=conversation_id,
+                        turn_id=turn_id,
+                        expected_profile_version=qualification.version,
+                        facts=facts,
+                    ),
+                )
+        except Exception as exc:
+            async with session.begin():
+                await service.mark_turn_pending(
+                    conversation_id,
+                    turn_id,
+                    exc,
+                    rejected=isinstance(exc, LeadServiceResponseError) and exc.status_code == 422,
+                )
+            raise
+        async with session.begin():
+            current = await service.finalize_turn(conversation_id, turn_id, qualification)
+            assert message.call_id is not None
+            call = await service.get_call(conversation_id, message.call_id, lock=True)
+            message = await service.message(conversation_id, turn_id)
+        return ConversationTurnResponse(
+            conversation=_conversation_response(current),
+            call=_call_response(call),
+            message_id=message.id,
+            sequence_number=message.sequence_number,
+            turn_status=cast(Any, message.turn_status),
+            qualification_error=message.qualification_error,
+            qualification=qualification,
+            next_action=current.next_action,
+        )
+
+    @app.post(
+        "/v1/conversations/{conversation_id}/agent-messages",
+        response_model=MessageHistoryEntry,
+        dependencies=[Depends(verify_service_auth)],
+    )
+    async def record_agent_message(
+        conversation_id: UUID,
+        data: AgentMessageCreate,
+        request: Request,
+        session: AsyncSession = Depends(get_session),
+    ) -> MessageHistoryEntry:
+        async with session.begin():
+            message = await ConversationService(
+                session, request_id=request_id(request)
+            ).persist_agent_message(conversation_id, data)
+        return _message_response(message)
 
     @app.get(
         "/v1/conversations/{conversation_id}/live-state",

@@ -19,7 +19,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+voice = ["pipecat-ai[webrtc,silero]==1.12.0"]
+browser-test = ["playwright==1.63.0"]
 dev = [
+    "pipecat-ai[webrtc,silero]==1.12.0",
     "mypy>=1.13,<2",
     "pytest>=8.3,<9",
     "pytest-asyncio>=0.24,<1",
@@ -28,6 +31,7 @@ dev = [
 
 [tool.setuptools]
 packages = [
+    "voice_platform_runtime",
     "voice_platform_speech",
     "voice_platform_llm",
     "event_relay",
@@ -42,6 +46,7 @@ packages = [
 ]
 
 [tool.setuptools.package-dir]
+voice_platform_runtime = "packages/voice-runtime/voice_platform_runtime"
 voice_platform_speech = "packages/speech/voice_platform_speech"
 voice_platform_llm = "packages/llm/voice_platform_llm"
 event_relay = "workers/event-relay/src/event_relay"
@@ -54,9 +59,13 @@ voice_platform_config = "packages/configuration/voice_platform_config"
 voice_platform_db = "packages/database/voice_platform_db"
 "voice_platform_db.models" = "packages/database/voice_platform_db/models"
 
+[tool.setuptools.package-data]
+voice_platform_runtime = ["client.html"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = [
+    "packages/voice-runtime",
     "packages/speech",
     "packages/llm",
     "packages/event-bus",
@@ -99,6 +108,7 @@ files = [
     "tests",
 ]
 mypy_path = [
+    "packages/voice-runtime",
     "packages/speech",
     "packages/llm",
     "packages/event-bus",

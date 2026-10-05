@@ -1289,3 +1289,954 @@ async def test_definitively_rejected_facts_do_not_permanently_block_the_conversa
         f"/v1/conversations/{system.conversation_id}/history", headers=headers
     )
     assert [m["turn_status"] for m in history.json()["items"]] == ["FAILED", "APPLIED"]
+
+
+def agent_body(system: System, version: int, **changes: Any) -> dict[str, Any]:
+    return {
+        "message_id": str(uuid4()),
+        "call_id": str(system.call_id),
+        "expected_version": version,
+        "text": "Hello, how can I help?",
+        "provider": "mock",
+        "model": "mock-v1",
+        **changes,
+    }
+
+
+async def post_agent(system: System, body: dict[str, Any]) -> httpx.Response:
+    return await system.conversation.post(
+        f"/v1/conversations/{system.conversation_id}/agent-messages",
+        headers={"X-Service-Token": "test-token", "X-Request-ID": "agent-test"},
+        json=body,
+    )
+
+
+async def test_agent_output_is_atomic_and_does_not_invoke_lead(system: System) -> None:
+    current = await transition_to_greeting(system)
+    # Deliberately remove the dependency: this endpoint must not need Lead.
+    system.conversation_app.state.lead_client = None
+    body = agent_body(system, current["version"])
+    response = await post_agent(system, body)
+    assert response.status_code == 200, response.text
+    assert response.json()["speaker"] == "AGENT"
+    assert response.json()["turn_status"] == "APPLIED"
+    assert response.json()["message_metadata"]["output_kind"] == "generated"
+    async with system.sessions() as session:
+        conversation = await session.get(Conversation, system.conversation_id)
+        assert conversation is not None
+        assert (conversation.state, conversation.version) == ("GREETING", current["version"])
+        assert conversation.last_turn_at is None
+        segment = await session.scalar(
+            select(TranscriptSegment).where(
+                TranscriptSegment.conversation_id == system.conversation_id
+            )
+        )
+        assert segment is not None and segment.speaker == "AGENT"
+        assert segment.provider_segment_id == body["message_id"]
+        assert segment.sequence_number == response.json()["sequence_number"]
+        event = await session.scalar(
+            select(DomainEvent).where(
+                DomainEvent.idempotency_key == f"conversation.agent.recorded:{body['message_id']}"
+            )
+        )
+        assert event is not None and event.request_id == "agent-test"
+        assert "Hello" not in json.dumps(event.payload)
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(LeadScoreHistory)
+                .where(LeadScoreHistory.lead_id == system.lead_id)
+            )
+            == 0
+        )
+
+
+async def test_agent_concurrent_lost_response_retry_creates_one_effect(system: System) -> None:
+    current = await transition_to_greeting(system)
+    body = agent_body(system, current["version"])
+    replies = await asyncio.gather(*(post_agent(system, body) for _ in range(6)))
+    assert all(reply.status_code == 200 for reply in replies)
+    assert len({reply.json()["id"] for reply in replies}) == 1
+    # Admission version is not part of replay identity.
+    retry = await post_agent(system, body | {"expected_version": 1})
+    assert retry.status_code == 200
+    async with system.sessions() as session:
+        for model in (Message, TranscriptSegment):
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(model)
+                    .where(model.conversation_id == system.conversation_id)
+                )
+                == 1
+            )
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(DomainEvent)
+                .where(DomainEvent.aggregate_id == UUID(body["message_id"]))
+            )
+            == 1
+        )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"text": "Changed response"},
+        {"provider": "other"},
+        {"model": "other"},
+        {"call_id": str(uuid4())},
+        {"parent_turn_id": str(uuid4())},
+    ],
+)
+async def test_agent_changed_retry_conflicts(system: System, change: dict[str, Any]) -> None:
+    current = await transition_to_greeting(system)
+    body = agent_body(system, current["version"])
+    assert (await post_agent(system, body)).status_code == 200
+    assert (await post_agent(system, body | change)).status_code == 409
+
+
+async def test_agent_replay_after_terminal_redaction_does_not_restore_text(system: System) -> None:
+    current = await transition_to_greeting(system)
+    body = agent_body(system, current["version"])
+    assert (await post_agent(system, body)).status_code == 200
+    headers = {"X-Service-Token": "test-token"}
+    failed = await system.conversation.post(
+        f"/v1/conversations/{system.conversation_id}/transitions",
+        headers=headers,
+        json={"target_state": "FAILED", "expected_version": current["version"], "reason": "test"},
+    )
+    assert failed.status_code == 200
+    async with system.sessions.begin() as session:
+        await ConversationService(session).redact_expired_content(
+            cutoff=datetime.now(UTC) + timedelta(seconds=1)
+        )
+    replay = await post_agent(system, body)
+    assert replay.status_code == 200 and replay.json()["text"] == "[REDACTED]"
+    assert replay.json()["redacted"] is True
+    assert (await post_agent(system, body | {"message_id": str(uuid4())})).status_code == 409
+
+
+async def test_agent_requires_connected_call_and_current_version(system: System) -> None:
+    assert (await post_agent(system, agent_body(system, 1))).status_code == 409
+    current = await transition_to_greeting(system)
+    assert (await post_agent(system, agent_body(system, 1))).status_code == 409
+    async with system.sessions.begin() as session:
+        call = await session.get(Call, system.call_id)
+        assert call is not None
+        call.status = "RECONNECTING"
+    assert (await post_agent(system, agent_body(system, current["version"]))).status_code == 409
+
+
+async def test_agent_reply_requires_latest_applied_user_and_cannot_overtake_pending(
+    system: System,
+) -> None:
+    current = await transition_to_greeting(system)
+    turn_id = uuid4()
+    user = {
+        "turn_id": str(turn_id),
+        "call_id": str(system.call_id),
+        "expected_version": current["version"],
+        "user_text": "Tell me more",
+    }
+    # Persist only, to reproduce the durable window before Lead/finalization.
+    from voice_platform_contracts.conversation import ConversationTurn
+
+    async with system.sessions.begin() as session:
+        await ConversationService(session).persist_turn(
+            system.conversation_id, ConversationTurn.model_validate(user)
+        )
+    body = agent_body(system, current["version"], parent_turn_id=str(turn_id))
+    assert (await post_agent(system, body)).status_code == 409
+    applied = await system.conversation.post(
+        f"/v1/conversations/{system.conversation_id}/turns",
+        headers={"X-Service-Token": "test-token"},
+        json=user,
+    )
+    assert applied.status_code == 200
+    version = applied.json()["conversation"]["version"]
+    assert (await post_agent(system, body | {"expected_version": version})).status_code == 200
+    assert (await post_agent(system, agent_body(system, version))).status_code == 409
+    assert (
+        await post_agent(system, agent_body(system, version, parent_turn_id=str(uuid4())))
+    ).status_code == 409
+    # Agent IDs cannot reuse a USER record even with identical text.
+    collision = agent_body(system, version, message_id=str(turn_id), text=user["user_text"])
+    assert (await post_agent(system, collision)).status_code == 409
+
+
+async def test_agent_rollback_and_database_failure_recover_without_partial_effects(
+    system: System,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current = await transition_to_greeting(system)
+    body = agent_body(system, current["version"])
+    original = ConversationService.persist_agent_message
+
+    async def interrupted(self: ConversationService, *args: Any, **kwargs: Any) -> Message:
+        await original(self, *args, **kwargs)
+        raise DatabaseTimeoutError("private database details")
+
+    monkeypatch.setattr(ConversationService, "persist_agent_message", interrupted)
+    failure = await post_agent(system, body)
+    assert failure.status_code == 503 and "private" not in failure.text
+    async with system.sessions() as session:
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(Message)
+                .where(Message.conversation_id == system.conversation_id)
+            )
+            == 0
+        )
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(TranscriptSegment)
+                .where(TranscriptSegment.conversation_id == system.conversation_id)
+            )
+            == 0
+        )
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(DomainEvent)
+                .where(DomainEvent.aggregate_id == UUID(body["message_id"]))
+            )
+            == 0
+        )
+    monkeypatch.setattr(ConversationService, "persist_agent_message", original)
+    assert (await post_agent(system, body)).status_code == 200
+
+
+async def test_agent_endpoint_validates_auth_and_redacts_invalid_input(system: System) -> None:
+    path = f"/v1/conversations/{system.conversation_id}/agent-messages"
+    assert (await system.conversation.post(path, json={})).status_code == 401
+    invalid = await post_agent(system, agent_body(system, 1, text="private\x00text"))
+    assert invalid.status_code == 422 and "private" not in invalid.text
+    missing = await system.conversation.post(
+        f"/v1/conversations/{uuid4()}/agent-messages",
+        headers={"X-Service-Token": "test-token"},
+        json=agent_body(system, 1),
+    )
+    assert missing.status_code == 404
+
+
+async def test_voice_dialogue_uses_durable_history_and_separate_agent_path(system: System) -> None:
+    from voice_platform_llm import LLMRouter, MockLLMProvider, MockScript, ProviderSlot
+    from voice_platform_runtime.backend import Backend
+    from voice_platform_runtime.dialogue import Dialogue
+
+    await transition_to_greeting(system)
+    dialogue = Dialogue(
+        Backend(system.conversation, "test-token"),
+        LLMRouter(
+            (ProviderSlot(MockLLMProvider(MockScript(text="Which country interests you?"))),)
+        ),
+        system.conversation_id,
+        system.call_id,
+    )
+    greeting = await dialogue.greeting()
+    assert greeting is not None
+    assert await dialogue.greeting() is None
+    turn_id = uuid4()
+    text, mid = await dialogue.reply("I would like to learn about immigration", turn_id)
+    assert text == "Which country interests you?"
+    async with system.sessions() as session:
+        messages = (
+            await session.scalars(
+                select(Message)
+                .where(Message.conversation_id == system.conversation_id)
+                .order_by(Message.sequence_number)
+            )
+        ).all()
+        assert [m.speaker for m in messages] == ["AGENT", "USER", "AGENT"]
+        assert messages[1].id == turn_id and messages[2].id == mid
+        assert all(m.turn_status == "APPLIED" for m in messages)
+        assert messages[1].message_metadata == {"qualification_facts": []}
+    assert dialogue.pending is None
+
+
+async def test_voice_dependency_failure_retries_original_turn_without_regeneration(
+    system: System,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from voice_platform_llm import LLMRouter, MockLLMProvider, ProviderSlot
+    from voice_platform_runtime.backend import Backend, DependencyError
+    from voice_platform_runtime.dialogue import Dialogue
+
+    await transition_to_greeting(system)
+    dialogue = Dialogue(
+        Backend(system.conversation, "test-token"),
+        LLMRouter((ProviderSlot(MockLLMProvider()),)),
+        system.conversation_id,
+        system.call_id,
+    )
+    original = system.conversation_app.state.lead_client
+
+    class Offline:
+        async def get_qualification(self, **_: Any) -> Any:
+            raise LeadServiceUnavailableError("private lead details")
+
+    system.conversation_app.state.lead_client = Offline()
+    uid = uuid4()
+    with pytest.raises(DependencyError):
+        await dialogue.reply("Information please", uid)
+    assert dialogue.pending is not None
+    async with system.sessions() as session:
+        user = await session.get(Message, uid)
+        assert user is not None and user.turn_status == "PENDING"
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(Message)
+                .where(
+                    Message.conversation_id == system.conversation_id, Message.speaker == "AGENT"
+                )
+            )
+            == 0
+        )
+    system.conversation_app.state.lead_client = original
+    await dialogue.recover()
+    assert dialogue.pending is None
+    # Reattach after a runtime restart and recover from durable state, not an audio replay.
+    other = Dialogue(
+        Backend(system.conversation, "test-token"),
+        dialogue.llm,
+        system.conversation_id,
+        system.call_id,
+    )
+    await other.recover()
+    async with system.sessions() as session:
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(Message)
+                .where(Message.conversation_id == system.conversation_id)
+            )
+            == 1
+        )
+
+
+async def test_voice_cancel_during_generation_preserves_user_without_agent_output(
+    system: System,
+) -> None:
+    from voice_platform_llm import LLMRouter, MockLLMProvider, MockScript, ProviderSlot
+    from voice_platform_runtime.backend import Backend
+    from voice_platform_runtime.dialogue import Dialogue
+
+    await transition_to_greeting(system)
+    dialogue = Dialogue(
+        Backend(system.conversation, "test-token"),
+        LLMRouter((ProviderSlot(MockLLMProvider(MockScript(delay_seconds=10))),)),
+        system.conversation_id,
+        system.call_id,
+    )
+    uid = uuid4()
+    task = asyncio.create_task(dialogue.reply("Please explain", uid))
+    try:
+        async with asyncio.timeout(5):
+            while True:
+                async with system.sessions() as session:
+                    user = await session.get(Message, uid)
+                    if user is not None and user.turn_status == "APPLIED":
+                        break
+                await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        if not task.done():
+            task.cancel()
+    async with system.sessions() as session:
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(Message)
+                .where(Message.conversation_id == system.conversation_id)
+            )
+            == 1
+        )
+    assert dialogue.pending is None
+
+
+async def test_voice_lost_agent_reply_recovers_same_output_id_without_duplicate(
+    system: System,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from voice_platform_contracts.conversation import AgentMessageCreate, MessageHistoryEntry
+    from voice_platform_llm import LLMRouter, MockLLMProvider, ProviderSlot
+    from voice_platform_runtime.backend import Backend, DependencyError
+    from voice_platform_runtime.dialogue import Dialogue
+
+    await transition_to_greeting(system)
+    backend = Backend(system.conversation, "test-token")
+    original = backend.agent
+
+    async def lost(cid: UUID, payload: AgentMessageCreate, rid: UUID) -> MessageHistoryEntry:
+        await original(cid, payload, rid)
+        raise DependencyError()
+
+    monkeypatch.setattr(backend, "agent", lost)
+    dialogue = Dialogue(
+        backend,
+        LLMRouter((ProviderSlot(MockLLMProvider()),)),
+        system.conversation_id,
+        system.call_id,
+    )
+    with pytest.raises(DependencyError):
+        await dialogue.reply("Information please", uuid4())
+    assert isinstance(dialogue.pending, AgentMessageCreate)
+    mid = dialogue.pending.message_id
+    monkeypatch.setattr(backend, "agent", original)
+    await dialogue.recover()
+    async with system.sessions() as session:
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(Message)
+                .where(Message.conversation_id == system.conversation_id)
+            )
+            == 2
+        )
+        assert await session.get(Message, mid) is not None
+
+
+async def test_voice_runtime_session_lifecycle_uses_backend_call_graph(system: System) -> None:
+    pytest.importorskip("pipecat")
+    from voice_platform_llm import LLMSettings
+    from voice_platform_runtime.app import Session, SessionCreate
+    from voice_platform_runtime.backend import Backend
+    from voice_platform_speech import SpeechSettings
+
+    async with httpx.AsyncClient() as providers:
+        session = Session(
+            SessionCreate(conversation_id=system.conversation_id, call_id=system.call_id),
+            Backend(system.conversation, "test-token"),
+            SpeechSettings(),
+            LLMSettings(),
+            providers,
+        )
+        await session.prepare()
+        assert session.call is not None and str(session.call.status) == "CONNECTING"
+        await session.connected()
+        assert str(session.call.status) == "CONNECTED" and session.processor.ready
+        await session.disconnected()
+        assert str(session.call.status) == "RECONNECTING" and not session.processor.ready
+        await session.connected()
+        assert str(session.call.status) == "CONNECTED" and session.call.reconnect_attempts == 1
+        await session.close()
+        assert str(session.call.status) == "ENDED"
+        await session.close()
+
+
+async def test_real_webrtc_audio_roundtrip_reconnect_and_transcript_persistence(
+    system: System,
+) -> None:
+    pytest.importorskip("pipecat")
+    import numpy as np
+    from aiortc import AudioStreamTrack, RTCConfiguration, RTCPeerConnection, RTCSessionDescription
+    from av import AudioFrame
+    from voice_platform_runtime.app import create_app as create_voice_app
+    from voice_platform_runtime.backend import Backend
+    from voice_platform_speech import AudioFormat, fixture_pcm
+
+    class ToneTrack(AudioStreamTrack):
+        async def recv(self) -> AudioFrame:
+            frame = cast(AudioFrame, await super().recv())
+            frame.planes[0].update(fixture_pcm(AudioFormat(sample_rate=8000)))
+            return frame
+
+    app = create_voice_app("http://unused", "test-token")
+    notifications: list[dict[str, Any]] = []
+    peers: list[RTCPeerConnection] = []
+    readers: list[asyncio.Task[None]] = []
+    audio_heard = asyncio.Event()
+
+    async def wait_for(check: Any) -> None:
+        async with asyncio.timeout(15):
+            while not check():
+                await asyncio.sleep(0.02)
+
+    async with app.router.lifespan_context(app):
+        app.state.backend = Backend(system.conversation, "test-token")
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app), base_url="http://voice"
+        ) as browser:
+            response = await browser.post(
+                "/sessions",
+                json={
+                    "conversation_id": str(system.conversation_id),
+                    "call_id": str(system.call_id),
+                    "manual_turns": True,
+                },
+            )
+            assert response.status_code == 200, response.text
+            session = response.json()
+            base = f"/sessions/{session['session_id']}"
+            headers = {"Authorization": "Bearer " + session["token"]}
+            assert (await browser.post(base + "/offer", json={"sdp": "invalid"})).status_code == 404
+            assert (
+                await browser.post(
+                    "/sessions",
+                    json={
+                        "conversation_id": str(system.conversation_id),
+                        "call_id": str(system.call_id),
+                    },
+                )
+            ).status_code == 409
+
+            async def connect(previous_pc: str | None = None) -> tuple[Any, str]:
+                pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
+                peers.append(pc)
+                pc.addTrack(ToneTrack())
+                channel = pc.createDataChannel("chat")
+
+                @channel.on("message")
+                def on_message(message: str) -> None:
+                    notifications.append(json.loads(message))
+
+                @pc.on("track")
+                def on_track(track: Any) -> None:
+                    async def read_audio() -> None:
+                        try:
+                            while True:
+                                frame = await track.recv()
+                                if np.max(np.abs(frame.to_ndarray().astype(np.int32))) > 100:
+                                    audio_heard.set()
+                        except Exception:
+                            pass
+
+                    readers.append(asyncio.create_task(read_audio()))
+
+                try:
+                    await pc.setLocalDescription(await pc.createOffer())
+                    offer = {
+                        "sdp": pc.localDescription.sdp,
+                        "type": "offer",
+                        "pc_id": previous_pc,
+                        "restart_pc": previous_pc is not None,
+                    }
+                    answer = await browser.post(base + "/offer", headers=headers, json=offer)
+                    assert answer.status_code == 200, answer.text
+                    result = answer.json()
+                    replay = await browser.post(base + "/offer", headers=headers, json=offer)
+                    assert replay.status_code == 200 and replay.json() == result
+                    await pc.setRemoteDescription(
+                        RTCSessionDescription(sdp=result["sdp"], type="answer")
+                    )
+                    await wait_for(
+                        lambda: (
+                            channel.readyState == "open"
+                            and any(n.get("type") == "connected" for n in notifications)
+                        )
+                    )
+                    return channel, str(result["pc_id"])
+                except BaseException:
+                    await pc.close()
+                    raise
+
+            try:
+                channel, pc_id = await connect()
+                await wait_for(lambda: any(n.get("type") == "ready" for n in notifications))
+                await asyncio.wait_for(audio_heard.wait(), 10)
+                channel.send(json.dumps({"type": "start"}))
+                await asyncio.sleep(0.3)
+                channel.send(json.dumps({"type": "stop"}))
+                await wait_for(
+                    lambda: any(
+                        n.get("type") == "transcript" and n.get("final") for n in notifications
+                    )
+                )
+                await wait_for(
+                    lambda: len([n for n in notifications if n.get("type") == "agent"]) == 2
+                )
+                notifications.clear()
+                await peers[0].close()
+                channel2, pc_id2 = await connect(pc_id)
+                assert pc_id2 != pc_id  # A restarted media peer keeps the durable call ID.
+                await wait_for(lambda: any(n.get("type") == "connected" for n in notifications))
+                assert channel2.readyState == "open"
+                ended = await browser.delete(base, headers=headers)
+                assert ended.status_code == 200, ended.text
+                assert (await browser.delete(base, headers=headers)).status_code == 404
+            finally:
+                for pc in peers:
+                    await pc.close()
+                for task in readers:
+                    task.cancel()
+                await asyncio.gather(*readers, return_exceptions=True)
+    async with system.sessions() as db:
+        call = await db.get(Call, system.call_id)
+        assert call is not None and call.status == "ENDED" and call.reconnect_attempts >= 1
+        messages = (
+            await db.scalars(
+                select(Message)
+                .where(Message.conversation_id == system.conversation_id)
+                .order_by(Message.sequence_number)
+            )
+        ).all()
+        assert [message.speaker for message in messages] == ["AGENT", "USER", "AGENT"]
+        assert (
+            await db.scalar(
+                select(func.count())
+                .select_from(TranscriptSegment)
+                .where(TranscriptSegment.conversation_id == system.conversation_id)
+            )
+            == 3
+        )
+
+
+@pytest.mark.parametrize("manual", [True, False])
+async def test_chrome_browser_voice_page_audio_controls_reconnect_and_end(
+    system: System,
+    monkeypatch: pytest.MonkeyPatch,
+    manual: bool,
+) -> None:
+    if os.getenv("RUN_BROWSER_VOICE_TESTS") != "1":
+        pytest.skip("opt in with RUN_BROWSER_VOICE_TESTS=1 and CHROME_EXECUTABLE")
+    pytest.importorskip("playwright")
+    import socket
+    from pathlib import Path
+
+    import uvicorn
+    from api_gateway.app import create_app as create_gateway_app
+    from api_gateway.client import ConversationServiceClient, LeadServiceClient
+    from api_gateway.settings import GatewaySettings
+    from fastapi import FastAPI
+    from playwright.async_api import async_playwright
+    from starlette.routing import Mount
+    from voice_platform_runtime.backend import Backend
+
+    chrome = os.getenv(
+        "CHROME_EXECUTABLE", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    )
+    speech_file = os.getenv("VOICE_TEST_WAV")
+    if not manual and (not speech_file or not Path(speech_file).exists()):
+        pytest.fail("VOICE_TEST_WAV is required for automatic VAD browser verification")
+    if not Path(chrome).exists():
+        pytest.fail("CHROME_EXECUTABLE must point to an installed browser")
+    monkeypatch.setenv("VOICE_RUNTIME_ENABLED", "1")
+    monkeypatch.setenv("SPEECH_MODE", "mock")
+    monkeypatch.setenv("LLM_MODE", "mock")
+    gateway = create_gateway_app(
+        settings=GatewaySettings("test", "http://lead", "test-token", 5),
+        client=LeadServiceClient(system.lead, service_auth_token="test-token"),
+        conversation_client=ConversationServiceClient(
+            system.conversation, service_auth_token="test-token"
+        ),
+    )
+    voice = cast(FastAPI, next(route.app for route in gateway.routes if isinstance(route, Mount)))
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    port = listener.getsockname()[1]
+    server = uvicorn.Server(
+        uvicorn.Config(gateway, log_level="critical", access_log=False, lifespan="off")
+    )
+    async with gateway.router.lifespan_context(gateway):
+        voice.state.backend = Backend(system.conversation, "test-token")
+        task = asyncio.create_task(server.serve(sockets=[listener]))
+        try:
+            async with asyncio.timeout(10):
+                while not server.started:
+                    await asyncio.sleep(0.02)
+            async with async_playwright() as playwright:
+                browser = await playwright.chromium.launch(
+                    executable_path=chrome,
+                    headless=True,
+                    args=[
+                        "--use-fake-device-for-media-stream",
+                        "--use-fake-ui-for-media-stream",
+                        "--autoplay-policy=no-user-gesture-required",
+                        *(
+                            ["--use-file-for-fake-audio-capture=" + str(speech_file)]
+                            if not manual
+                            else []
+                        ),
+                    ],
+                )
+                try:
+                    page = await browser.new_page()
+                    failures: list[str] = []
+                    page.on("pageerror", lambda error: failures.append(str(error)))
+                    await page.goto(f"http://127.0.0.1:{port}/voice/")
+                    await page.locator("#conversation").fill(str(system.conversation_id))
+                    await page.locator("#call").fill(str(system.call_id))
+                    await page.locator("#manual").set_checked(manual)
+                    await page.locator("#connect").click()
+                    await page.wait_for_function(
+                        "document.querySelector('#log').textContent.includes('\\\"type\\\":\\\"ready\\\"')",
+                        timeout=20000,
+                    )
+                    # Synthetic microphone input never touches the user's microphone.
+                    await page.wait_for_function(
+                        "document.querySelector('#audio').currentTime > 0", timeout=10000
+                    )
+                    if manual:
+                        await page.locator("#talk").click()
+                        await asyncio.sleep(0.3)
+                        await page.locator("#talk").click()
+                    await page.wait_for_function(
+                        "document.querySelector('#log').textContent.includes('\\\"type\\\":\\\"transcript\\\"')",
+                        timeout=20000,
+                    )
+                    await page.wait_for_function(
+                        "document.querySelector('#log').textContent"
+                        '.split(\'\\"type\\":\\"agent\\"\').length >= 3',
+                        timeout=20000,
+                    )
+                    await page.locator("#reconnect").click()
+                    await page.wait_for_function(
+                        "document.querySelector('#log').textContent"
+                        '.split(\'\\"type\\":\\"connected\\"\').length >= 3',
+                        timeout=20000,
+                    )
+                    await page.locator("#end").click()
+                    await page.wait_for_function(
+                        "document.querySelector('#log').textContent.includes('\\\"ended\\\":true')",
+                        timeout=10000,
+                    )
+                    assert failures == []
+                    assert "Request failed" not in await page.locator("#log").inner_text()
+                finally:
+                    await browser.close()
+        finally:
+            server.should_exit = True
+            await asyncio.wait_for(task, 10)
+            listener.close()
+    async with system.sessions() as session:
+        call = await session.get(Call, system.call_id)
+        assert call is not None and call.status == "ENDED"
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(Message)
+                .where(Message.conversation_id == system.conversation_id)
+            )
+            == 3
+        )
+
+
+async def test_gateway_agent_endpoint_preserves_payload_correlation_and_retry(
+    system: System,
+) -> None:
+    from api_gateway.app import create_app as create_gateway_app
+    from api_gateway.client import ConversationServiceClient, LeadServiceClient
+    from api_gateway.settings import GatewaySettings
+
+    current = await transition_to_greeting(system)
+    gateway = create_gateway_app(
+        settings=GatewaySettings("test", "http://lead", "test-token", 5),
+        client=LeadServiceClient(system.lead, service_auth_token="test-token"),
+        conversation_client=ConversationServiceClient(
+            system.conversation, service_auth_token="test-token"
+        ),
+    )
+    async with gateway.router.lifespan_context(gateway):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(gateway), base_url="http://gateway"
+        ) as client:
+            path = f"/v1/conversations/{system.conversation_id}/agent-messages"
+            body = agent_body(system, current["version"])
+            first = await client.post(
+                path, json=body, headers={"X-Request-ID": "gateway-agent-test"}
+            )
+            assert first.status_code == 200
+            assert first.headers["X-Request-ID"] == "gateway-agent-test"
+            retry = await client.post(path, json=body)
+            assert retry.json()["id"] == first.json()["id"]
+            assert (await client.post(path, json=body | {"text": "changed"})).status_code == 409
+            async with system.sessions() as session:
+                event = await session.scalar(
+                    select(DomainEvent).where(
+                        DomainEvent.idempotency_key
+                        == f"conversation.agent.recorded:{body['message_id']}"
+                    )
+                )
+                assert event is not None and event.request_id == "gateway-agent-test"
+
+
+async def test_voice_cancel_waits_for_durable_mutation_and_clears_pending_after_commit(
+    system: System,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from voice_platform_contracts.conversation import ConversationTurn, ConversationTurnResponse
+    from voice_platform_llm import LLMRouter, MockLLMProvider, ProviderSlot
+    from voice_platform_runtime.backend import Backend
+    from voice_platform_runtime.dialogue import Dialogue
+
+    await transition_to_greeting(system)
+    backend = Backend(system.conversation, "test-token")
+    committed = asyncio.Event()
+    release = asyncio.Event()
+    original = backend.user
+
+    async def delayed(cid: UUID, body: ConversationTurn, rid: UUID) -> ConversationTurnResponse:
+        result = await original(cid, body, rid)
+        committed.set()
+        await release.wait()
+        return result
+
+    monkeypatch.setattr(backend, "user", delayed)
+    dialogue = Dialogue(
+        backend,
+        LLMRouter((ProviderSlot(MockLLMProvider()),)),
+        system.conversation_id,
+        system.call_id,
+    )
+    uid = uuid4()
+    task = asyncio.create_task(dialogue.reply("Please explain", uid))
+    await asyncio.wait_for(committed.wait(), 5)
+    task.cancel()
+    await asyncio.sleep(0.01)
+    assert not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert dialogue.pending is None
+    async with system.sessions() as db:
+        message = await db.get(Message, uid)
+        assert message is not None and message.turn_status == "APPLIED"
+        assert (
+            await db.scalar(
+                select(func.count())
+                .select_from(Message)
+                .where(Message.conversation_id == system.conversation_id)
+            )
+            == 1
+        )
+
+
+async def test_voice_call_lost_transition_response_recovers_authoritative_status(
+    system: System,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("pipecat")
+    from voice_platform_contracts.conversation import CallResponse
+    from voice_platform_llm import LLMSettings
+    from voice_platform_runtime.app import Session, SessionCreate
+    from voice_platform_runtime.backend import Backend, DependencyError
+    from voice_platform_speech import SpeechSettings
+
+    backend = Backend(system.conversation, "test-token")
+    original = backend.call
+    lost_once = False
+
+    async def lost(
+        cid: UUID, current: CallResponse, target: str, rid: UUID, reason: str | None = None
+    ) -> CallResponse:
+        nonlocal lost_once
+        result = await original(cid, current, target, rid, reason)
+        if target == "CONNECTED" and not lost_once:
+            lost_once = True
+            raise DependencyError()
+        return result
+
+    monkeypatch.setattr(backend, "call", lost)
+    async with httpx.AsyncClient() as providers:
+        session = Session(
+            SessionCreate(conversation_id=system.conversation_id, call_id=system.call_id),
+            backend,
+            SpeechSettings(),
+            LLMSettings(),
+            providers,
+        )
+        await session.prepare()
+        await session.connected()
+        assert session.call is not None and session.call.status == "CONNECTED"
+        assert session.processor.ready
+        await session.close()
+    async with system.sessions() as db:
+        call = await db.get(Call, system.call_id)
+        assert call is not None and call.version == 4  # one CONNECTING, CONNECTED, ENDED
+
+
+async def test_voice_restart_recovers_existing_pending_user_from_durable_history(
+    system: System,
+) -> None:
+    from voice_platform_contracts.conversation import ConversationTurn
+    from voice_platform_llm import LLMRouter, MockLLMProvider, ProviderSlot
+    from voice_platform_runtime.backend import Backend
+    from voice_platform_runtime.dialogue import Dialogue
+
+    current = await transition_to_greeting(system)
+    uid = uuid4()
+    async with system.sessions.begin() as db:
+        await ConversationService(db).persist_turn(
+            system.conversation_id,
+            ConversationTurn(
+                turn_id=uid,
+                call_id=system.call_id,
+                expected_version=current["version"],
+                user_text="Saved before restart",
+            ),
+        )
+    dialogue = Dialogue(
+        Backend(system.conversation, "test-token"),
+        LLMRouter((ProviderSlot(MockLLMProvider()),)),
+        system.conversation_id,
+        system.call_id,
+    )
+    await dialogue.recover()
+    async with system.sessions() as db:
+        message = await db.get(Message, uid)
+        assert message is not None and message.turn_status == "APPLIED"
+        assert (
+            await db.scalar(
+                select(func.count())
+                .select_from(Message)
+                .where(Message.conversation_id == system.conversation_id)
+            )
+            == 1
+        )
+
+
+async def test_voice_close_releases_media_even_when_backend_end_is_unavailable(
+    system: System, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("pipecat")
+    from voice_platform_llm import LLMSettings
+    from voice_platform_runtime.app import Session, SessionCreate
+    from voice_platform_runtime.backend import Backend, DependencyError
+    from voice_platform_speech import SpeechSettings
+
+    class MediaConnection:
+        disconnected = False
+
+        def send_app_message(self, payload: dict[str, object]) -> None:
+            pass
+
+        async def disconnect(self) -> None:
+            self.disconnected = True
+
+    backend = Backend(system.conversation, "test-token")
+    media = MediaConnection()
+    async with httpx.AsyncClient() as providers:
+        session = Session(
+            SessionCreate(conversation_id=system.conversation_id, call_id=system.call_id),
+            backend,
+            SpeechSettings(),
+            LLMSettings(),
+            providers,
+        )
+        await session.prepare()
+        await session.connected()
+        session.connection = cast(Any, media)
+
+        async def unavailable(*_: Any, **__: Any) -> Any:
+            raise DependencyError()
+
+        with monkeypatch.context() as patch:
+            patch.setattr(backend, "call", unavailable)
+            patch.setattr(backend, "live", unavailable)
+            with pytest.raises(DependencyError):
+                await session.close()
+        assert media.disconnected
+        assert not session.closed  # Retain the original durable call for end retry.
+        async with system.sessions() as db:
+            call = await db.get(Call, system.call_id)
+            assert call is not None and call.status == "CONNECTED"
+        await session.close()
+        assert session.closed and session.call is not None and session.call.status == "ENDED"

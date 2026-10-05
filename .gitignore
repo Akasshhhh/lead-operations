@@ -71,8 +71,6 @@ build/
 *.backup
 *.sql.gz
 appendonlydir/
-/docs/PROJECT_HANDOFF.md
-
 # Operating-system and editor metadata
 .DS_Store
 ._*
@@ -83,3 +81,5 @@ Desktop.ini
 *.swp
 *.swo
 *~
+
+/docs/PROJECT_HANDOFF.md
