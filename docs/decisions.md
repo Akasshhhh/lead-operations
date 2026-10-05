@@ -109,4 +109,74 @@ external business integrations, sophisticated multilingual routing, specialized
 STT variants, automatic retention, multiple dashboards, and elaborate load-test
 infrastructure are deferred. Existing foundational tables/migrations are retained.
 The exact per-module scope, verification gates, and conflict-stop rule are in
-[`implementation-plan.md`](implementation-plan.md). Module 8 is unstarted.
+[`implementation-plan.md`](implementation-plan.md). Module 8 is now complete.
+
+## ADR-011: Module 8 stateless LLM boundary and complete tool proposals
+
+A shared Python library supplies provider-independent generation and streaming
+contracts, a stateless runtime adapter, and deterministic local fixtures. Trusted
+instructions are separate from history/tool results; callers explicitly supply
+context from existing durable records. No second memory or transcript store is
+introduced. Request/conversation/turn IDs correlate calls without creating a new
+business idempotency mechanism.
+
+Adapters normalize vendor fragments into text deltas and complete JSON tool
+proposals. The runtime validates tool names/IDs, bounds, finish consistency, EOF,
+and a total generation deadline. Partial events remain provisional until validated
+completion; tool execution and authoritative domain validation are Module 13.
+Cancellation propagates and closes request-owned provider resources. Real
+providers, routing, and retries are Module 9. See [`module-8.md`](module-8.md).
+
+## ADR-012: OpenAI/OpenRouter adapters and safe partial-output recovery
+
+Module 9 uses OpenAI and OpenRouter (Llama 3.3 70B Instruct by default), following
+the user's provider preference. Both adapters use existing HTTPX behind Module 8
+contracts. OpenRouter's content-free repeated terminal usage frame is normalized
+explicitly; strict validation remains for all content, tools, completion, and EOF.
+Its internal provider fallback is disabled so runtime attempts remain visible.
+
+The router has request-local attribution and unchanged full context. Collected
+generation buffers/discards incomplete attempts before retry/failover. Live streams
+cannot retry or fail over once output is exposed, preventing duplicate text/tool
+proposals. No tool execution or durable effects occur inside this boundary.
+
+Circuit state and capability selection live in the runtime process. Half-open
+probes are exclusive; epoch guards protect recovery from stale in-flight results.
+Cancellation releases request resources and probe admission without a failure
+count. The existing provider-health table and domain services remain unchanged.
+Configuration, verification limits, and later integration: [`module-9.md`](module-9.md).
+
+## ADR-013: Speech contracts preserve domain ownership and explicit audio formats
+
+Module 10 introduces a separate dependency-free speech library beside the LLM
+library. Raw mono signed 16-bit little-endian PCM, explicit sample rates, bounded
+utterance streams, and sample-relative offsets avoid vendor codecs/session state
+inside domain contracts. STT interim revisions are provisional; finals are
+immutable within their stream. TTS emits ordered audio for one supplied text.
+Terminal success requires valid accounting and EOF. Cancellation closes owned
+streams; partial audio/text never triggers an implicit replay.
+
+Conversation remains the only transcript/call owner; Lead remains the scoring
+authority. Mocks use scripted text and deterministic tones, without recognition
+or synthesis claims. Real adapters/routing are Module 11; Pipecat, playback,
+VAD, interruption and durable mapping are Module 12. The user's TTS candidates
+are OpenAI Realtime or Sarvam/Rumik. A Realtime adapter must first demonstrate
+that it preserves the separate LLM-to-TTS boundary; an end-to-end agent is not
+approved by this provider preference. Details: [`module-10.md`](module-10.md).
+
+## ADR-014: Sarvam/Rumik speech paths and recovery before output only
+
+Module 11 shares Sarvam realtime STT across two TTS paths (Sarvam and Rumik),
+following the user's TTS alternatives and avoiding multiple specialized STT
+implementations. Request-scoped HTTP PCM TTS fits the complete-text input contract;
+Sarvam STT uses a manually bounded utterance/socket. Audio format, text limits and
+configured voice capabilities are explicit. OpenAI Realtime is deferred because
+it is a response-generating interface and an exact separate text-to-audio boundary
+was not established; the OpenAI/OpenRouter LLM layer remains unchanged.
+
+Speech recovery never replays exposed text/audio. Before exposure, bounded STT
+input replay retains consumed frames without a durable audio store. An interrupted
+input read is unsafe to resume and fails rather than silently truncate. Provider
+health/circuits remain process-local with exclusive probes and epoch guards;
+domain state is unaffected. Pipecat/playback/VAD and durable call/transcript
+integration remain Module 12. Details: [`module-11.md`](module-11.md).

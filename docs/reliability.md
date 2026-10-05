@@ -1,4 +1,31 @@
-# Reliability — implemented boundaries through Module 7
+# Reliability — implemented boundaries through Module 11
+
+## Speech library boundary
+
+Module 10 validates bounded utterance audio, transcript revisions/finals, output
+ordering and sample counts. Missing/trailing completion or unresolved interims
+fail with content-free errors. One total deadline includes audio/provider reads
+and consumer pauses. Timeout, cancellation and early close release owned input
+and output streams; terminal success is exposed only after EOF and closure.
+Partial text/audio is not replayed. No persistence or call/scoring state changes
+occur here. Module 11 adds real adapters and recovery below. Transport,
+playback-buffer interruption and durable transcript mapping remain Module 12.
+See [`module-10.md`](module-10.md).
+
+## Speech provider recovery
+
+Sarvam STT and Sarvam/Rumik TTS use explicit PCM capabilities and controlled
+vendor errors. Retry/failover is bounded by both per-attempt and original request
+deadlines and stops after any transcript/audio event is exposed. STT preserves
+bounded request-local consumed audio before exposure; interrupted input reads
+prevent unsafe replay. Invalid input does not count as a provider health failure.
+HTTP responses and STT sender/receiver/socket resources close on failure,
+cancellation and early close. Process-local circuits have exclusive recovery
+probes, cancellation-safe admission and epoch guards against stale successes.
+No health-table writes, periodic paid probes or automatic real-to-mock fallback
+are added. Real STT currently has one vendor; its recovery retries Sarvam, while
+TTS can switch vendors. Wire fixtures/local sockets verify behavior; paid vendor
+access/latency remains unverified. See [`module-11.md`](module-11.md).
 
 ## Event path
 
@@ -94,3 +121,24 @@ metadata/content changes; the operator can rerun the command.
 The recorded-turn fingerprint remains available after content redaction;
 identical replay cannot restore the original text/metadata or duplicate score
 history. Verification: [`modules-1-7-verification.md`](modules-1-7-verification.md).
+
+## Modules 8–9 LLM boundary
+
+Generation requests carry explicit context and stable correlation UUIDs; providers
+never execute backend tools or write business state. Router attempts share an
+original deadline and are validated through the Module 8 runtime adapter.
+
+| Failure | Preserved result and recovery |
+|---|---|
+| Provider fails before exposed output | Bounded retry for transient errors, then eligible fallback with unchanged context |
+| Buffered generation fails after partial text/tools | Discard the incomplete attempt; expose only the fallback's complete response |
+| Live stream fails after exposed output | Close and propagate the controlled failure; no automatic replay or fallback |
+| Repeated provider failures | Open circuit; after cooldown admit one recovery probe; other requests skip it |
+| Probe cancelled or caller closes stream early | Close provider resources, release probe slot, and preserve failure counters |
+| Older in-flight result returns after a newer circuit opens | Epoch guard prevents stale results from changing the newer circuit |
+| All providers fail or lack required capability | Explicit error; no automatic mock, score, or qualification fallback |
+
+Health is process-local operational memory, not durable business truth. Live
+vendor generation and vendor billing cancellation were not verified by fixture
+tests. The existing Conversation/Lead idempotency and durable-before-processing
+requirements remain. See [`module-9.md`](module-9.md) for exact limits.

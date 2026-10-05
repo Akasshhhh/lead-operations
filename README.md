@@ -7,7 +7,7 @@ integration, failure, and documentation gates before the next module begins.
 
 ## Current status
 
-**Modules 1–7 — Foundation, persistence, Lead Service, Gateway, events, live conversations, and transcript history**
+**Modules 1–11 — Foundation, domain services, events, transcripts, LLM and speech routing**
 
 The current implementation establishes the Python/Node version conventions,
 shared configuration validation, PostgreSQL persistence, deterministic leads,
@@ -16,6 +16,32 @@ relay with retry/deduplication/dead-letter support, and the Conversation Service
 with live turn ingestion and durable call sessions.
 Module 7 adds paginated history, transcript search, and explicit terminal-content
 retention redaction.
+Module 8 adds vendor-independent LLM contracts, a stateless streaming runtime/test
+adapter, and a deterministic mock. Interface and local-use documentation:
+[`docs/module-8.md`](docs/module-8.md). Its verification passed **181 tests** with
+real PostgreSQL/Redis and one expected opt-in Compose skip, including 38 new LLM
+contract, streaming/tool, timeout, cancellation, and failure tests.
+
+Module 9 adds OpenAI and OpenRouter (Llama 3.3 by default), bounded retries,
+capability-aware routing, circuit recovery, and safe handling of partial output.
+Configuration, deterministic adapter tests, and limitations:
+[`docs/module-9.md`](docs/module-9.md). Real credentials are optional; local mock
+mode remains the default. Verification passed **261 regression tests** with real
+PostgreSQL/Redis and one expected Compose skip, including 80 new provider/router
+tests. Live paid API calls were not run.
+
+Module 10 adds vendor-independent streaming STT/TTS contracts, validated speech
+runtime adapters, cancellation/deadline handling, and deterministic text/PCM
+fixtures. Local examples and provider preferences:
+[`docs/module-10.md`](docs/module-10.md). Verification passed **75 new speech tests**
+and **336 full regression tests**, with one expected Compose skip. Real speech
+providers are added by Module 11 below.
+
+Module 11 adds Sarvam realtime STT, Sarvam/Rumik PCM TTS, capability-aware
+selection, bounded retries, circuit recovery and safe failover. Verification:
+**88 new tests**, **424 full regression tests**, one expected Compose skip.
+Mock mode remains the default; live vendor calls were not run. Configuration,
+provider limits and deferred integration: [`docs/module-11.md`](docs/module-11.md).
 
 Modules 1–5 have undergone an expanded correctness and failure-path audit.
 Findings, fixes, and verification evidence: [`docs/modules-1-5-audit.md`](docs/modules-1-5-audit.md).
@@ -46,7 +72,7 @@ The approved reduced plan runs from **Modules 8–18**:
 | 17 | Realistic evaluation, voice E2E, failure recovery, and basic concurrency |
 | 18 | Final regression/hardening, configuration, documentation, and demo runbook |
 
-Next is **Module 8 — LLM provider interfaces**, currently unstarted. Each module
+Next is **Module 12 — Pipecat browser/WebRTC voice runtime**, currently unstarted. Each module
 begins with inspection and a conflict-stop gate and ends with relevant tests and
 documentation. Exact scope/gates and deferred infrastructure are in
 [`docs/implementation-plan.md`](docs/implementation-plan.md).
@@ -111,7 +137,8 @@ make infra-down
 ```
 
 Local development and tests do not require external LLM, STT, or TTS credentials.
-Deterministic provider adapters will be introduced before real provider adapters.
+The deterministic LLM mock and optional OpenAI/OpenRouter adapters are available
+now. Speech adapters remain in later modules.
 
 ## Development commands
 

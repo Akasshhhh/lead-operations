@@ -165,3 +165,129 @@ outbox unpublished/exhausted and dead letters are all zero.
 
 The pre-fix failures, minimal corrections, and remaining module boundaries are
 recorded in [`modules-1-7-verification.md`](modules-1-7-verification.md).
+
+## Module 8 verification — 2026-10-04
+
+The credential-free contract/mock runtime gate passed **38 tests**:
+
+```bash
+.venv/bin/python -m pytest tests/unit/test_llm_contracts.py tests/integration/test_llm_runtime.py
+```
+
+The full regression command above, using a newly created/migrated disposable
+`module8_verification_*` PostgreSQL database and unique Redis test keys, passed
+**181 tests with one expected opt-in Compose skip** (182 collected, event-stack
+deployment tests excluded). The disposable database was removed afterward.
+This includes Modules 1–7, actual database/Redis failures and recovery, and
+upgrade/downgrade/rebuild/preservation/drift checks at `e8f2a6b3c901`.
+
+New coverage includes context/JSON bounds, role/tool correlation, deterministic
+streaming and replay after restart, concurrent generation, complete tool proposals
+and result context, partial output followed by failure, undeclared/duplicate tools,
+premature EOF/trailing output, inconsistent finish reasons, timeout before/during/
+after output, cancellation/early-close resource release, vendor error redaction,
+and nested JSON snapshot isolation.
+
+Ruff format/lint, strict mypy (**79 files**), `pip check`, and Compose configuration
+validation passed. This library-only module changes no deployed service or
+migration; the six rebuilt Compose tests remain the historical Modules 1–7
+deployment evidence and were not rerun for Module 8. Interfaces, limitations,
+and deferred work are documented in [`module-8.md`](module-8.md).
+
+The project wheel built successfully with the declared setuptools backend in an
+isolated temporary build environment. Importing `voice_platform_llm` directly
+from that wheel and running credential-free mock generation also passed.
+
+## Module 9 verification — 2026-10-04
+
+The credential-free OpenAI/OpenRouter adapter, router, and configuration gate
+passed **80 new tests**:
+
+```bash
+.venv/bin/python -m pytest tests/unit/test_llm_router.py tests/unit/test_llm_settings.py tests/integration/test_llm_providers.py
+```
+
+Together with Module 8, **118 LLM tests passed**. The full regression gate used a
+fresh disposable PostgreSQL database and isolated Redis keys and passed
+**261 tests with one expected opt-in Compose skip** (262 collected; event-stack
+deployment tests excluded). The disposable database was removed afterward.
+Database/Redis failure recovery and migration roundtrip/rebuild/preservation/drift
+checks passed at unchanged head `e8f2a6b3c901`.
+
+Adapter integration uses real HTTPX streaming with `MockTransport` and fragmented
+vendor-format SSE, including context/tool translation, usage, safe status errors,
+malformed/truncated output, timeouts, cancellation, and OpenAI-to-OpenRouter
+fallback. Router coverage includes partial-output discard for buffered generation,
+no replay after live output, bounded retry/deadline behavior, capability filtering,
+circuit recovery, exclusive/cancelled probes, epoch races, and concurrent result
+attribution. No paid vendor requests were made.
+
+Ruff format (**106 files**)/lint, strict mypy (**87 source files**), `pip check`,
+Compose configuration, and Git whitespace checks passed. Existing service,
+migration, and business contracts were preserved. The six rebuilt Compose tests
+remain historical Modules 1–7 deployment evidence. The optional Module 9 wheel
+rebuild was declined and remains unverified; Module 8's wheel result above is
+historical. See [`module-9.md`](module-9.md) for contracts and deferred integration.
+
+## Module 10 verification — 2026-10-04
+
+The credential-free speech contract/mock runtime gate passed **75 tests**:
+
+```bash
+.venv/bin/python -m pytest tests/unit/test_speech_contracts.py tests/integration/test_speech_runtime.py
+```
+
+The full regression gate used a fresh migrated disposable PostgreSQL database
+and isolated Redis keys: **336 passed, one expected opt-in Compose skip** (337
+collected; event-stack deployment tests excluded). The disposable database was
+removed afterward. Migration roundtrip/rebuild/preservation/drift and existing
+database/Redis recovery checks passed at `e8f2a6b3c901`.
+
+New coverage includes PCM formats/alignment, Unicode/bounds, deterministic scripts
+and audio, silence without fabricated text, incremental audio pulls/backpressure,
+interim replacement and final immutability, invalid/truncated/trailing completion,
+sample accounting, total audio/text/event limits, concurrency/restart, deadlines
+including input reads and consumer pauses, EOF timeout, safe vendor exceptions,
+early close and cancellation/resource cleanup. The documented local mock example
+also ran successfully. These are library integration tests, not vendor or browser
+speech-quality tests.
+
+Ruff format/lint, strict mypy (**94 source files**), `pip check`, Compose
+configuration and Git whitespace checks passed. There is no new migration,
+dependency, service or HTTP contract. No live speech API, browser audio, wheel
+build or Compose deployment rebuild was run. Historical deployment evidence is
+unchanged. Runtime ownership, provider preferences and deferred work are in
+[`module-10.md`](module-10.md).
+
+## Module 11 verification — 2026-10-05
+
+The new credential-free adapter/router/configuration suites passed **88 tests**
+(52 adapter cases, 21 router cases, 15 settings cases):
+
+```bash
+.venv/bin/python -m pytest tests/integration/test_speech_providers.py tests/unit/test_speech_router.py tests/unit/test_speech_settings.py
+```
+
+The adapter gate uses HTTPX `MockTransport` with fragmented PCM, deterministic
+WebSocket wire fixtures, and a real local WebSocket server. The latter requires
+local socket permission; it exercises the production connector without a paid
+API key. With Module 10, **163 speech cases passed**. Recovery coverage includes
+Sarvam-to-Rumik fallback with identical text/identity, no replay after audio or
+transcript exposure, safe STT input prefix/EOF replay, interrupted-input rejection,
+retry budgets, capability skips, circuits, exclusive probes, cancelled probes,
+epoch races and concurrent requests. Adapter cases verify vendor fields, raw PCM
+validation, controlled status/errors, timeouts, EOF, and request/task cleanup,
+including safe input-close errors when no provider is selected.
+
+The full gate used a fresh migrated disposable PostgreSQL database and isolated
+Redis keys: **424 passed, one expected opt-in Compose skip** (425 collected;
+event-stack deployment tests excluded). The disposable database was removed
+afterward. Database/Redis recovery and migration roundtrip/rebuild/preservation/
+drift passed at unchanged head `e8f2a6b3c901`.
+
+Ruff format/lint, strict mypy (**101 source files**), `pip check`, Compose config
+and Git whitespace checks passed. The documented explicit mock example ran.
+`websockets>=15,<18` is declared directly and available in the verification
+environment. No paid vendor smoke, browser/Pipecat, wheel build or Compose
+deployment rebuild was run; the Modules 1–7 deployment evidence remains
+historical. Limits and deferred runtime work: [`module-11.md`](module-11.md).

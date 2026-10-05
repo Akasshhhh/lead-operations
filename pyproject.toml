@@ -15,6 +15,7 @@ dependencies = [
     "redis>=5.2,<6",
     "sqlalchemy[asyncio]>=2.0.36,<3",
     "uvicorn[standard]>=0.34,<1",
+    "websockets>=15,<18",
 ]
 
 [project.optional-dependencies]
@@ -27,6 +28,8 @@ dev = [
 
 [tool.setuptools]
 packages = [
+    "voice_platform_speech",
+    "voice_platform_llm",
     "event_relay",
     "voice_platform_events",
     "lead_service",
@@ -39,6 +42,8 @@ packages = [
 ]
 
 [tool.setuptools.package-dir]
+voice_platform_speech = "packages/speech/voice_platform_speech"
+voice_platform_llm = "packages/llm/voice_platform_llm"
 event_relay = "workers/event-relay/src/event_relay"
 voice_platform_events = "packages/event-bus/voice_platform_events"
 api_gateway = "apps/api-gateway/src/api_gateway"
@@ -52,6 +57,8 @@ voice_platform_db = "packages/database/voice_platform_db"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = [
+    "packages/speech",
+    "packages/llm",
     "packages/event-bus",
     "workers/event-relay/src",
     "packages/configuration",
@@ -92,6 +99,8 @@ files = [
     "tests",
 ]
 mypy_path = [
+    "packages/speech",
+    "packages/llm",
     "packages/event-bus",
     "workers/event-relay/src",
     "packages/configuration",

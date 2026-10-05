@@ -12,7 +12,30 @@ retention. Their final reliability verification is recorded in
 
 Modules 8–18 build one browser voice qualification product and central dashboard;
 see [`implementation-plan.md`](implementation-plan.md). Provider integrations and
-Pipecat are planned; Module 8 is unstarted.
+Pipecat are planned. Module 8 supplies the vendor-independent LLM contracts,
+stateless runtime/local test adapter, and deterministic mock in
+`packages/llm/voice_platform_llm`; see [`module-8.md`](module-8.md).
+Module 9 adds OpenAI/OpenRouter HTTP adapters, capability selection, bounded
+retries/deadlines, and runtime-local circuit recovery; see
+[`module-9.md`](module-9.md). The package
+owns no durable state and does not execute business tools or change the existing
+live-turn path. Buffered generation may fail over after discarding an incomplete
+attempt; live streams propagate failures after any exposed output without replay.
+
+Module 10 adds `packages/speech/voice_platform_speech`: bounded mono PCM,
+interim/final transcript and synthesis streams, closable STT/TTS protocols,
+stateless deadline/validation adapters, and deterministic mocks. It owns no
+transcript store, playback, VAD, or call state. Sample offsets are utterance-local;
+future runtime integration uses the existing Conversation persistence boundary.
+See [`module-10.md`](module-10.md) for speech contracts.
+
+Module 11 adds request-scoped Sarvam realtime STT and Sarvam/Rumik HTTP PCM TTS
+adapters. Separate STT/TTS routers implement capability selection, bounded
+recovery and process-local health. Both real voice paths share Sarvam STT;
+TTS failover selects Sarvam/Rumik only before exposed audio. STT retries retain
+bounded request-local audio and stop after any transcript output or an unsafe
+interrupted input read. No service/domain ownership changes. Module 12
+(Pipecat/browser runtime) is next; see [`module-11.md`](module-11.md).
 
 ## Service boundaries
 

@@ -15,7 +15,8 @@ current module; advance after its verification and documentation gates pass.
 The remaining roadmap replaces the original 32-module plan. The goal is one
 demonstrable browser voice qualification product with provider failover, live
 Lead-owned qualification/scoring, and one central dashboard. Modules 1–7 are
-implemented and reverified; Modules 8–18 are planned. Module 8 is unstarted.
+implemented and reverified; Modules 8–11 are implemented and verified. Modules
+12–18 are planned. The next module is 12 — Pipecat browser/WebRTC voice runtime.
 
 1. Repository and development infrastructure
 2. PostgreSQL, migrations, and base domain models
@@ -347,4 +348,95 @@ no model or state-machine changes were needed in this verification pass.
 
 Evidence and exact recovery semantics: [`modules-1-7-verification.md`](modules-1-7-verification.md)
 and [`testing.md`](testing.md). The next implementation module is **8 — LLM
-provider interfaces**.
+provider interfaces** (subsequently completed; see below).
+
+## Module 8 status and Definition of Done
+
+Complete. A shared vendor-independent LLM package adds explicit prompt/context,
+generation/response, streaming/tool proposal, error, timeout, and cancellation
+contracts; a stateless runtime/local test adapter; and a deterministic mock.
+No existing services, APIs, models, migrations, scoring, or state graphs change.
+
+- [x] Provider protocol and bounded JSON request/response contracts
+- [x] Separate trusted instruction and user/assistant/tool context
+- [x] Correlated complete tool proposals and tool-result history
+- [x] Validated streaming completion, partial-failure, and cancellation cleanup
+- [x] Whole-generation timeout and content-free provider error codes
+- [x] Replayable mock with deterministic chunks, tools, and fault fixtures
+- [x] 38 contract/mock integration/failure tests
+- [x] Modules 1–7 real PostgreSQL/Redis regressions: 181 passed, one opt-in Compose skip
+- [x] Ruff lint/format, strict mypy (79 files), dependency and Compose checks
+- [x] Project wheel build plus import/mock-generation smoke check from the wheel
+- [x] Interface/ownership/local-use documentation in [`module-8.md`](module-8.md)
+
+Real adapters, routers, health, retries, circuit breakers, and failover are
+Module 9. Tool execution, domain validation, and runtime/service integration
+remain in later modules. Module 8 is a library boundary, not a new service.
+
+## Module 9 status and Definition of Done
+
+Complete. OpenAI and OpenRouter adapters use Module 8's contracts and the existing
+HTTPX dependency. OpenRouter defaults to Llama 3.3 70B Instruct; model IDs and
+provider preference order are configurable. Mock mode remains credential-free.
+
+- [x] Real text/function HTTP streaming adapters and full context translation
+- [x] Fragmented SSE/tool arguments, termination/usage validation, and safe errors
+- [x] Capability-aware provider selection and immutable operational health snapshots
+- [x] Bounded retries, backoff, per-attempt and original request deadlines
+- [x] Closed/open/half-open circuits with one recovery probe and epoch race guards
+- [x] Buffered failover discards incomplete attempts; live failover stops after exposed output
+- [x] Configuration/key validation and explicit mock/real modes
+- [x] 80 new adapter/router/configuration tests; 118 combined LLM tests passed
+- [x] Full PostgreSQL/Redis regression and migration gates: 261 passed, one expected opt-in Compose skip
+- [x] Interface/configuration/recovery documentation in [`module-9.md`](module-9.md)
+
+Provider integration verification uses HTTPX with deterministic vendor-format
+fixtures. Live paid vendor calls were not run. The optional wheel rebuild was
+declined and is unverified for this module. No service/migration/HTTP-contract or
+scoring changes were introduced. Circuit state is operational process memory;
+durable status/UI exposure remains later-module work. Module 10 subsequently adds
+speech interfaces below.
+
+## Module 10 status and Definition of Done
+
+Complete. The separate speech package supplies immutable bounded PCM, transcript,
+request/completion contracts, closable STT/TTS protocols, stateless streaming
+validation/deadline adapters, deterministic mock providers, and PCM fixtures.
+
+- [x] Audio format/alignment, sequence and utterance identity contracts
+- [x] Interim replacement, immutable finals, sample offsets and terminal accounting
+- [x] Pull-based streaming/backpressure with bounded audio/text/event counts
+- [x] EOF validation, controlled errors, timeout, cancellation and early-close cleanup
+- [x] Deterministic mock audio/text and concurrent/restarted reuse
+- [x] 75 contract/mock integration and failure tests passed
+- [x] Existing PostgreSQL/Redis regression gates: 336 passed, one expected Compose skip
+- [x] Ruff format/lint, strict mypy (94 source files), dependency/Compose and migration checks
+- [x] Runtime ownership, provider preferences, limitations and local-use documentation
+
+No provider adapter, router, Pipecat, service/HTTP/schema/state/scoring change is
+introduced. User TTS candidates are OpenAI Realtime or Sarvam/Rumik; final provider
+selection and Realtime's compatibility with independently generated LLM text are
+Module 11 work. Module 11 subsequently selects/implements adapters below.
+
+## Module 11 status and Definition of Done
+
+Complete. Sarvam realtime STT and Sarvam/Rumik HTTP PCM TTS implement Module 10's
+unchanged contracts. The two real paths share one STT provider, preserving the
+reduced scope. OpenAI Realtime TTS is deferred because an independently generated
+LLM text-to-audio guarantee was not established.
+
+- [x] Request-scoped real STT/TTS adapters and explicit PCM/model/voice capabilities
+- [x] Safe errors, wire/completion validation, deadlines and cancellation cleanup
+- [x] Bounded pre-output retry/failover; no replay of exposed text/audio
+- [x] Bounded STT prefix/EOF replay and interrupted-input protection
+- [x] Process-local health/circuits with exclusive probes and epoch race protection
+- [x] Credential-free mock mode and safe explicit real configuration
+- [x] 88 new adapter/router/configuration tests, including real local WebSocket transport
+- [x] Full PostgreSQL/Redis regression gate: 424 passed, one expected Compose skip
+- [x] Ruff format/lint, strict mypy (101 files), dependency/Compose and migration gates
+- [x] Configuration/ownership/verification documentation in [`module-11.md`](module-11.md)
+
+Live paid vendor access/quality/latency, browser audio, wheel builds and Compose
+deployment rebuilds were not verified in this pass. Domain services, scoring,
+state graphs, HTTP contracts and migration head are unchanged. Module 12 is next;
+stop before Pipecat, playback/VAD, call integration or business tool execution.
