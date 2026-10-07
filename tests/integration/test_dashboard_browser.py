@@ -1,6 +1,7 @@
 """Production Next.js → Gateway → actual domain services/PostgreSQL + browser WebRTC."""
 
 import asyncio
+import json
 import os
 import re
 import shutil
@@ -85,7 +86,8 @@ class DashboardProvider:
             )
             yield CompletionEvent(finish_reason="tool_calls")
         else:
-            yield TextDelta(text="I can help collect your details.")
+            plan = json.loads(request.context.messages[-1].content.split(": ", 1)[1])["plan"]
+            yield TextDelta(text="Thanks, that helps. " + (plan["next_question"] or ""))
             yield CompletionEvent(finish_reason="stop")
 
 
@@ -121,7 +123,7 @@ async def dashboard(
         return LLMRouter((ProviderSlot(DashboardProvider()),))
 
     def stt_router(self: SpeechSettings, **kwargs: Any) -> STTRouter:
-        return STTRouter((SpeechSlot(stt),))
+        return STTRouter((SpeechSlot(stt),), policy=self.policy)
 
     monkeypatch.setattr(LLMSettings, "build_router", llm_router)
     monkeypatch.setattr(SpeechSettings, "build_stt", stt_router)
@@ -219,6 +221,7 @@ async def test_production_dashboard_voice_score_reconnect_lost_offer_and_handoff
 
             await page.route("**/api/voice/sessions/*/offer", lose_offer)
             await page.goto(url)
+            await page.get_by_label("Push-to-talk").check()
             await expect(
                 page.get_by_role("heading", name="Conversation Integration Lead")
             ).to_be_visible()
@@ -329,6 +332,7 @@ async def test_production_dashboard_lead_outage_preserves_durable_reads(
         try:
             page = await browser.new_page()
             await page.goto(dashboard[0])
+            await page.get_by_label("Push-to-talk").check()
             await expect(page.locator(".score-display strong")).to_have_text("10")
             original = system.conversation_app.state.lead_client.plan
 
@@ -378,6 +382,7 @@ async def test_production_dashboard_recovers_lost_lead_creation_and_reload(
 
             await page.route("**/api/v1/leads", lose_create)
             await page.goto(dashboard[0])
+            await page.get_by_label("Push-to-talk").check()
             await page.get_by_role("button", name="Create synthetic lead", exact=False).click()
             await page.get_by_role("textbox", name="Name", exact=True).fill(
                 "Dashboard Created Lead"
@@ -435,6 +440,7 @@ async def test_dashboard_fault_reset_recovers_durable_turn_and_media(
         try:
             page = await browser.new_page()
             await page.goto(dashboard[0])
+            await page.get_by_label("Push-to-talk").check()
             await page.get_by_role("button", name="Start / resume call", exact=False).click()
             await expect(
                 page.get_by_role("button", name="Start speaking", exact=False)
@@ -521,6 +527,7 @@ async def test_two_dashboard_calls_keep_media_transcripts_and_scores_isolated(
             async def start(index: int, s: System) -> None:
                 page = pages[index]
                 await page.goto(f"{origin}?lead={s.lead_id}")
+                await page.get_by_label("Push-to-talk").check()
                 await page.get_by_role("button", name="Start / resume call", exact=False).click()
                 await expect(
                     page.get_by_role("button", name="Start speaking", exact=False)
@@ -584,3 +591,52 @@ async def test_two_dashboard_calls_keep_media_transcripts_and_scores_isolated(
             call = await db.get(Call, s.call_id)
             assert call is not None and call.status == "ENDED"
             assert call.reconnect_attempts == (0 if s is system else 1)
+
+
+async def test_dashboard_default_automatic_voice_applies_turn_without_stop_button(
+    system: System,
+    dashboard: tuple[str, MockSTTProvider],
+) -> None:
+    from playwright.async_api import async_playwright, expect
+
+    speech_file = os.getenv("VOICE_TEST_WAV")
+    if not speech_file or not Path(speech_file).exists():
+        pytest.fail("VOICE_TEST_WAV speech fixture is required for dashboard automatic VAD")
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(
+            executable_path=os.getenv(
+                "CHROME_EXECUTABLE", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+            ),
+            headless=True,
+            args=[
+                "--use-fake-device-for-media-stream",
+                "--use-fake-ui-for-media-stream",
+                "--autoplay-policy=no-user-gesture-required",
+                f"--use-file-for-fake-audio-capture={speech_file}",
+            ],
+        )
+        try:
+            page = await browser.new_page()
+            await page.goto(dashboard[0])
+            await expect(
+                page.get_by_role("heading", name="Conversation Integration Lead")
+            ).to_be_visible()
+            await expect(page.get_by_label("Push-to-talk")).not_to_be_checked()
+            await page.get_by_role("button", name="Start / resume call", exact=False).click()
+            await expect(page.get_by_role("button", name="End call", exact=True)).to_be_visible()
+            await expect(
+                page.get_by_role("button", name="Start speaking", exact=False)
+            ).to_have_count(0)
+            await expect(page.locator(".score-display strong")).to_have_text("10", timeout=30000)
+            transcript = page.get_by_role("log", name="Durable transcript")
+            await expect(transcript).to_contain_text("I confirm my masters degree.")
+            await expect(transcript).to_contain_text("How many years", timeout=15000)
+            history = await Backend(system.conversation, "test-token").history(
+                system.conversation_id, uuid4()
+            )
+            assert any(
+                item.speaker == "USER" and item.turn_status == "APPLIED" for item in history.items
+            )
+            await page.get_by_role("button", name="End call", exact=True).click()
+        finally:
+            await browser.close()

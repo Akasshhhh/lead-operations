@@ -17,7 +17,8 @@ demonstrable browser voice qualification product with provider failover, live
 Lead-owned qualification/scoring, and one central dashboard. Modules 1–7 are
 implemented and reverified; Modules 8–18 are implemented and verified below.
 Module 15 is committed as `3d6eab1` on top of `4ce9107`, Module 16 as `0b1842b`;
-Modules 17–18 changes are uncommitted. The approved roadmap is complete within
+Modules 17–18 are committed at `2f153d1`. Subsequent voice/intake fixes remain
+uncommitted as documented below. The approved roadmap is complete within
 the documented fixture/live-smoke limits; additional scope requires approval.
 
 1. Repository and development infrastructure
@@ -1827,3 +1828,466 @@ git add Makefile README.md apps docker-compose.yml docs pyproject.toml services 
 git commit -m "feat: complete evaluation and final hardening" \
   -m "Add deterministic evaluation and Chrome demo gates, authenticated Compose readiness, and non-root Python containers. Verify recovery and concurrency; document current architecture, configuration, runbook, and live-smoke limits."
 ```
+
+
+## Live OpenAI GPT-5 mini compatibility fix
+
+After Modules 17–18 were committed as `2f153d1`, a live user turn reached Sarvam
+STT and persisted as PENDING, but the OpenAI step failed. The greeting is a
+separate deterministic runtime output, so its successful Sarvam TTS playback did
+not prove the LLM request worked. The configured model was `gpt-5-mini`.
+
+A minimal synthetic diagnostic using the running Gateway confirmed HTTP 400,
+`unsupported_value`, parameter `temperature`: the adapter sent the contract's
+`temperature=0` to a model that rejects that override. Credentials and vendor
+error bodies were not logged. The OpenAI adapter now omits temperature and sets
+`reasoning_effort=minimal` only for `gpt-5-mini` and its `2025-08-07` snapshot.
+Other OpenAI models and OpenRouter keep their prior sampling/request payloads;
+the default model, API endpoint, domain tools, idempotency, pending-turn recovery,
+scoring, state machines and schema are unchanged.
+
+Official compatibility guidance:
+https://developers.openai.com/api/docs/guides/latest-model?model=gpt-5.2
+(GPT-5.2 parameter compatibility explicitly describes the older GPT-5 mini
+restriction). Minimal reasoning is supported by the original GPT-5 family and
+fits this voice workload's bounded generation budget. This does not promise
+sampling determinism; business validation/scoring remains deterministic in Lead.
+
+Verification: **85 adapter/router/configuration cases passed**, including a wire
+fixture that rejects temperature and verifies a complete tool stream, snapshot
+support and unchanged other-provider parameters. **33 staged qualification/
+recovery cases passed** against a disposable migrated PostgreSQL DB. Ruff
+format/lint, strict mypy134 files and Compose validation passed. Two small live
+synthetic requests through the edited adapter completed successfully: plain text
+in 3.455s (10 output tokens), qualification tool proposal in 2.436s (46 tokens).
+These are live API compatibility checks, not a full human microphone, scoring or
+Docker audio smoke certification. The four-second configured attempt deadline
+has little latency margin; if a live attempt times out, set
+`LLM_ATTEMPT_TIMEOUT_SECONDS=12` in the root .env and recreate Gateway, keeping
+existing request/whole-loop deadlines. No automatic timeout/config change made.
+
+For code updates rebuild Gateway, not dashboard:
+`docker compose up -d --build --no-deps --force-recreate api-gateway`.
+A restart disconnects media and loses process-local session diagnostics but
+preserves durable conversations/transcripts. Hard refresh, start/resume the same
+lead, recover its original pending turn, then speak a new turn. Recovery finishes
+saved business work without replaying old speech. Do not delete pending input or
+invent scores to bypass the failure. The user's separate .env.example model
+change is preserved. PROJECT_HANDOFF stays ignored/untracked.
+
+
+Deployment follow-up: the normal Gateway Dockerfile rebuild failed while PyPI
+was downloading voice dependencies (`ReadTimeoutError` from files.pythonhosted.org).
+The running image was retained, and an adapter-only image was built from that
+local base with the edited openai.py, preserving all tested installed dependencies
+and UID10001. No repository Dockerfile changed. Local tags:
+`lead-operations-platform-api-gateway:gpt5-mini-fix` and rollback
+`lead-operations-platform-api-gateway:before-gpt5-mini-fix`; latest points to the
+adapter-only fix. Gateway was recreated with --no-build and reached healthy status.
+A future normal --build will include the source fix but still requires a working
+PyPI connection. This temporary deployment method is not a dependency rebuild gate.
+
+Aggregate inspection found three PENDING user turns attached to terminal calls
+(two ENDED, one FAILED). Permission to collect their identities for recovery was
+declined; no pending input was changed or deleted and no operator recovery ran.
+Do not claim a restart clears them or that replayed audio will be delivered.
+Existing QualifiedDialogue.recover supports durable replay under the original
+call identity, but a fresh media call uses a different call identity and cannot
+silently adopt the old pending turn. Those three need a separately authorized
+recovery using existing guarded persistence, before their conversations can
+continue normally. No state-machine or recovery admission changes were added.
+For a fresh live test after deployment, hard-refresh the dashboard, create/select
+a lead without pending work, start a call and speak. Confirm the new user turn
+becomes APPLIED and OpenAI health reports success; the two synthetic live checks
+alone are not evidence of this full browser interaction.
+
+
+Final deployed-image verification confirmed model gpt-5-mini, real LLM/voice
+modes, reasoning_effort minimal, no temperature field and UID 10001. Gateway is
+healthy and still published on localhost:18000; dashboard remains localhost:3000.
+The disposable live_fix_test database was dropped. Fix, tests and main-doc notes
+are uncommitted on `2f153d1`; the user's .env.example edit is separate and preserved.
+
+
+### Approved conversational voice presentation (2026-10-07)
+
+The user approved replacing the exact-question presentation rule after inspection
+showed that QualifiedDialogue discarded generated speech whenever Lead returned
+next_question. Suitable model speech now reaches the existing durable agent-write
+and TTS path. The prompt asks for brief, warm responses grounded in the latest
+caller turn/history, help with uncertainty, natural transitions and at most one
+primary question, guided by Lead's authoritative next_field and known answers.
+This approved exception supersedes earlier notes requiring all incomplete-profile
+speech to equal the raw Lead question; it does not move qualification ownership.
+
+Lead still validates proposals, confirms facts, prioritizes conflicts, selects the
+next qualification field and computes the score. For a provisional or conflicting
+selected field, generated speech must include Lead's complete next_question
+verbatim, preserving the existing explicit English `I confirm` protocol. A missing
+protocol or more than one question mark uses the Lead question unchanged. Suitable
+model candidates also pass the existing Conversation output safety policy;
+rejected candidates use the Lead question when available, otherwise the existing
+policy replacement. Policy outages fail without persisting unreviewed model text.
+Empty, truncated or otherwise invalid generations retain existing failure behavior.
+
+Accepted model speech records its actual provider/model; Lead-question fallback
+retains voice-runtime / qualification-policy-v1 attribution. Existing contracts,
+tables, tools, workflow acknowledgements, request routing, staged user persistence,
+stable agent IDs, persistence-before-speech and recovery remain unchanged.
+Presentation guards are deliberately narrow: question-mark counting is not a
+semantic question/field classifier, and prompt guidance is not a guarantee of
+vendor response quality. Confirmation remains explicit rather than accepting yes/no.
+
+New database-backed tests cover contextual uncertainty/cost/background replies,
+confirmed history and all six fields through score 60, verbatim confirmation,
+conflict priority, safety fallback, multiple-question fallback, policy outage and
+lost agent-write acknowledgement recovery without another generation. Existing
+qualification/evaluation/browser fixtures now exercise conversational prefixes
+while preserving the authoritative next question and all prior business assertions.
+
+Verification: focused conversation/qualification/workflow/evaluation suites:
+**78 passed**. Ruff formatting/lint and strict mypy: **135 files passed**.
+Full regression with Chrome dashboard and voice opt-ins: **607 passed, 1 skipped**
+in 144.02s. The skipped test is the opt-in Compose conversation test;
+process-level event-stack outage and Compose hardening files were excluded to
+avoid restarting the live stack. Browser speech/LLM providers were fixtures;
+this run does not certify paid-provider microphone quality. Existing third-party
+Python deprecation warnings remain. The disposable conversation_style_test
+database was removed after verification.
+PROJECT_HANDOFF remains ignored/untracked. No live lead or pending-turn recovery
+was performed. Deploy this runtime source by rebuilding/recreating api-gateway;
+rebuilding dashboard alone does not change the backend dialogue. These source
+changes do not certify a paid-provider microphone session.
+
+
+### Live turn detection and Sarvam continuation fix (2026-10-07)
+
+The user requested fixes for frequent invalid_output, calls waiting for the Stop
+button, and text-only responses to microphone checks. Recent provider logs place
+the observed invalid_output in sarvam-stt before qualification/LLM processing.
+A synthetic 28-second live Sarvam probe reproduced it: the provider finalized
+segment 0, then emitted transcript.partial with utterance_idx 1. The adapter
+previously rejected all segments after the first final. A single manually bounded
+application turn can therefore contain multiple vendor segments. This observation
+supersedes the earlier one-vendor-segment assumption, without changing the speech
+contracts or business turn identity.
+
+The adapter now maps contiguous vendor segments to distinct immutable transcript
+segments, keeps stable partial/final identities and consumed-audio coverage, and
+reports the actual final count. It receives continuation events while audio is
+still being sent, rather than waiting for input EOF at the first segment final.
+Session completion still joins/validates the sender. Duplicate finals, index gaps,
+unresolved partials, malformed frames and bounded-stream violations remain errors.
+VoiceProcessor already joins final segment text into one staged user turn; no
+separate qualification update is created for each vendor segment. The same live
+synthetic probe using the edited adapter completed with two final segments.
+Only event types/indices/counts were retained, not vendor transcripts or keys.
+
+Dashboard defaults to automatic Silero detection (existing 0.4s stop-silence
+threshold). Explicit Push-to-talk remains available before connecting and still
+requires Start/Stop by design. Existing PTT browser cases now select it explicitly.
+A failed STT task releases its active feed; nonpending errors allow a fresh
+utterance and give a speak-again instruction rather than misleading durable
+recovery advice. Pending business operations retain existing recovery gating.
+The qualification dialogue prompt identifies a live browser voice call and
+microphone-derived user transcripts: acknowledge received words for audibility
+checks, without inventing volume/noise/microphone-quality assessments.
+
+Lead ownership, confirmation/conflict/scoring, safety policy, staged persistence,
+idempotency, workflow acknowledgements, provider routing, schema and state graphs
+are unchanged. No persistent vendor session, speculative LLM processing or
+uncommitted speech streaming is introduced. Existing unrelated uncommitted
+changes and the user-owned .env.example edit are preserved; handoff stays ignored.
+
+Verification results are recorded after the final gates below. Live Sarvam probes
+used synthetic audio and no business persistence; physical-microphone quality and
+all vendor failure shapes remain outside what those probes establish.
+
+Verification: **613 full Python cases passed, 1 deployment-only skip**, with
+process-level event-stack/hardening files excluded and Chrome voice/dashboard
+opt-ins enabled. **8 frontend Chrome cases passed** for defaults, explicit PTT,
+readiness, nonpending speech retries and pending-operation recovery gating.
+Ruff formatting/lint, strict mypy (**136 files**), TypeScript/Prettier and the
+production dashboard build passed. The additional real dashboard automatic-VAD
+case passed separately: synthetic microphone → silence endpoint → staged user
+persistence → Lead score 10 → durable agent reply, with no Start/Stop clicks.
+Its STT fixture now honors the runtime's reserved 45-second live-input deadline;
+previously the mock replacement inadvertently used four seconds. Existing PTT,
+reconnect, workflow, fault and concurrent-call cases are rechecked below.
+
+The live edited-parser test accepted two immutable final segments from the same
+28-second synthetic turn and a consistent session completion. Original parser
+probes reproduced the rejection at continuation index 1. A separate short
+synthetic request succeeded with the original parser. This is a targeted vendor
+compatibility fix, not a promise that every invalid_output cause is eliminated.
+
+Activate source updates with:
+`docker compose up -d --build --no-deps --force-recreate api-gateway dashboard`.
+End the call first, hard-refresh the dashboard, and leave Push-to-talk unchecked
+before starting/resuming a call. Gateway/frontend sources are not automatically
+loaded into already-running containers. No live business input was modified,
+no terminal-call pending turn recovered, and no schema migration added.
+
+Final dashboard regression after the fixture correction: **6/6 passed** (54.17s),
+including the new default automatic-VAD case and existing lost-offer/reconnect,
+workflow, fault/reset/recovery and concurrent-call checks. Final static/whitespace
+checks passed. The dedicated voice_turn_fix_test database was removed afterward.
+Changes remain uncommitted. An unrelated untracked docs/ponytail-audit.md appeared
+during verification and was left untouched; this task only updated the two main
+project documents.
+
+
+### Turn admission, internal-output guard and microphone threshold fix (2026-10-07)
+
+The user reported intermittent turn_busy, internal tool names in spoken next-step
+answers, and background disturbances interrupting playback. Inspection found that
+begin_utterance cancelled/flushed the current response before checking for active
+STT or pending business work. This could strand an accepted staged turn and create
+a recovery requirement merely from a second speech onset. No material conflict
+with the completed architecture was found; the fix preserves its boundaries.
+
+Turn admission now checks active STT and accepted pending input/agent/workflow
+writes before cancelling media. An onset while those operations are progressing
+is ignored without a false dependency error, audio flush, duplicate turn or
+cancellation. Caller audio during that busy interval is not queued as another
+business turn. Once durable work is finished, normal barge-in can still cancel
+uncommitted generation or playback. A failed saved operation still reports
+turn_busy with retry_required and must use the existing recovery protocol.
+Cancellation is rechecked for an ambiguous pending acknowledgement after joining
+shielded writes. No pending live turn was deleted or recovered by this task.
+
+The Conversation Service output screen additionally rejects the six current
+internal tool names and three workflow identifiers, case-insensitively, including
+names embedded in JSON/backticks. It retains existing unsupported-claim decisions
+and the response contract; this remains a conservative lexical screen rather than
+a general semantic safety classifier. QualifiedDialogue still uses the exact
+Lead-selected question as the fallback and persists reviewed output before TTS.
+Its prompt forbids exposing functions, arguments or execution plans, answers
+next-step questions in everyday language, and permits a relevant answer without
+forcing another qualification question. Existing exact confirmation/conflict
+protocols, qualification/scoring ownership and workflow acknowledgements remain.
+Model presentation is prompt-guided; fixture tests do not certify every live model
+response or guarantee that arbitrary paraphrases of internal details are caught.
+
+Runtime uses native Silero/Pipecat volume gating with VOICE_VAD_MIN_VOLUME, validated
+as a finite number between 0 and 1 (default 0.65, previously native 0.60). Compose
+passes it to api-gateway. Invalid values fail runtime startup. This is Pipecat's
+normalized smoothed loudness scale, not a raw amplitude percentage or a fixed dB
+value. Existing confidence 0.7, onset 0.2s and silence endpoint 0.4s are retained.
+Raise gradually (for example 0.70) if quiet disturbances still trigger interruptions;
+lower if your own quiet speech is missed. Native speech confidence and sustained
+onset must also pass. Loud background voices can still count as speech, so room
+and microphone calibration remains a physical-microphone smoke-test requirement.
+No extra noise-filter package, speech contract, schema or state transition was added.
+
+Verification: broad regression with Chrome voice/dashboard opt-ins yielded
+627 passed, 1 deployment-only skip, and one new test assertion failure: it required
+exactly one question even for the newly permitted zero-question next-step reply.
+Updated that assertion to the existing at-most-one-question contract. All 78
+affected dialogue/workflow/runtime/VAD cases then passed, including an additional
+database-backed test: pause staged qualification binding, deliver another speech
+onset, resume, and verify one user/agent pair APPLIED and Lead-owned score 10.
+Tests also cover active STT/workflow admission, saved-turn recovery gating, genuine
+barge-in, tool leakage replacement before persistence, invalid threshold settings,
+and native volume/confidence/onset/silence gating. All browser cases passed in the
+broad run. Process-level event-stack outage and Compose hardening tests were
+excluded to avoid restarting the live stack. Ruff formatting/lint and strict mypy
+passed (131 source files). Existing third-party deprecation warnings remain.
+
+Changes are uncommitted and not automatically deployed. End the call, then run:
+`docker compose up -d --build --no-deps --force-recreate conversation-service api-gateway dashboard`
+Hard-refresh and leave Push-to-talk unchecked for automatic endpointing. Updating
+only dashboard cannot activate the runtime or server-side output guard changes.
+PROJECT_HANDOFF remains ignored/untracked; the user-owned .env.example changes and
+unrelated untracked docs/ponytail-audit.md are preserved. Only the two existing main
+project documents receive this implementation note.
+
+
+### Approved immigration intake: Step 1 rejection semantics (2026-10-07)
+
+The user approved two sequential steps: first prevent rejected LLM qualification
+proposals from stalling voice conversations; after verification extend non-scoring
+immigration intake with target_country and visa_type. Read both main project files
+completely and reconciled code/Git at 2f153d1 with earlier uncommitted voice fixes.
+Those changes, the user-owned .env.example edit and unrelated ponytail-audit.md
+are preserved. No material conflict was found for Step 1's additive resolution.
+
+Step 1 reuses the existing RECORDED -> BOUND -> APPLIED staged path and empty-fact
+application; no new schema/state graph or qualification/scoring ownership change.
+ProposedFacts adds on_rejection (default reject; optional continue_without_facts)
+and a bounded extraction_rejection descriptor for empty continuation batches.
+The model's tool schema does not expose these policy switches. Existing API callers
+retain strict 422 rejection with no bound receipt and may correct before binding.
+Historical default-request binding hashes exclude the new default fields, preserving
+receipt replay. Opt-in continuation settings/diagnostics are covered by its immutable
+request fingerprint; changed reuse still conflicts.
+
+The runtime opts into continuation. Malformed/unsupported extraction shapes and
+invalid-output extraction streams produce an empty batch with structured diagnostics;
+other provider failures retain pending work and recovery. Lead still independently
+validates the entire supported batch and never partially accepts it. Only its typed
+422 proposal rejection can be bound as an empty batch for the opt-in voice path.
+Unclassified rejections, identity/version conflicts, outages, timeouts and uncertain
+writes do not become silent success. The caller transcript remains intact, reviewed
+agent output can follow, and a subsequent new turn is admitted. Empty application
+reads authoritative qualification without mutating answers/score/history.
+
+Lead validation now supplies content-free source/code/field diagnostics: invalid_value,
+invalid_evidence, confirmation_required or conflict_not_present. Confirmation and
+conflict checks themselves are unchanged. Conversation retains proposal_rejection
+(source, code, field, provider/model) in existing Message metadata and emits bounded
+correlated qualification.proposal telemetry after committing binding. Rejected raw
+values/evidence/transcripts are not copied into diagnostics/logs. Structured extraction
+failures use invalid_proposal. A data-channel qualification_rejected notice explains
+that words were saved without changing qualification; it is not a dependency error.
+
+DependencyError status 404/409/422 maps to operation_not_found/operation_conflict/
+operation_rejected across response, recovery and media lifecycle handling. Actual
+unavailable dependencies/uncertain writes retain dependency_unavailable. The dashboard
+uses dependency-return advice only for that code; controlled rejections have clearer
+clarification/recovery instructions. Recovery still completes original durable work
+without regenerating old speech. Existing definitive application-rejection FAILED
+handling and legacy /turns behavior remain intact.
+
+The real incident transcript was 'I want to go to USA and I need H1B visa.' Lead
+validation returned 422 for its proposed facts, and input stayed RECORDED/PENDING.
+The original rejected field/value was not retained, so earlier diagnosis could not
+identify the exact model proposal. Step 1 preserves rejection classification for
+future calls; it does not rewrite or recover that live historical turn.
+
+Focused Step 1 gate: 90 tests passed across rejection/recovery, staged qualification,
+conversational persistence, Lead evidence and Pipecat runtime. Includes unsupported
+fields, extra score inputs, invalid values/evidence/conflict flags, all-or-nothing
+mixed batches, next-turn admission, no Lead effects, no extraction on recovery, lost
+binding replies, malformed extraction streams and genuine provider outages. Strict
+caller 422 and immutable binding behavior remain tested. All 8 frontend Chrome tests
+passed against a rebuilt production dashboard; an initial stale-build run failed its
+new notice assertions and was corrected by rebuilding, without weakening assertions.
+Ruff format/lint, strict mypy (132 sources), TypeScript/Prettier, production build
+and whitespace pass. Full regression result is appended after completion below.
+
+Step 2 inspection identified a country-write consistency conflict before its changes:
+LeadUpdate/PATCH currently permits directly replacing or clearing target_country
+using Lead.version, without qualification evidence/status. New caller-confirmed
+country intake plus mirroring that existing field would introduce competing values
+or stale confirmation if the existing PATCH writer remained independent. Changing
+that completed PATCH behavior is a separate contract decision; no Step 2 fields,
+scoring rules, schema or profile-write semantics have been changed yet.
+
+Smallest proposed resolution to confirm: keep all country writes within Lead and
+reuse current tables/optimistic concurrency. Voice-confirmed country updates mirror
+the existing target_country field atomically. Existing profile-country changes
+reconcile the current intake status rather than inheriting the old confirmation;
+a changed confirmed destination records a conflict for explicit caller resolution,
+and clearing the preference invalidates current intake confirmation while retaining
+historical transcript/provenance. Visa type uses existing qualification-answer
+storage with explicit evidence/confirmation semantics. Both remain non-scoring;
+existing six-field completeness/classification/range must remain unchanged.
+This requires agreement on the existing profile PATCH behavior before Step 2.
+
+Source changes remain uncommitted and are not deployed automatically. Once ready,
+end the live call and rebuild/recreate lead-service, conversation-service, api-gateway
+and dashboard together: the typed Lead rejection response is required by the new
+Conversation continuation policy. PROJECT_HANDOFF remains ignored/untracked.
+
+
+Step 1 final regression gate: 637 passed, 1 deployment-only skip, 10 existing
+third-party deprecation warnings (152.54s). Chrome dashboard/voice opt-ins and real
+WebRTC, PostgreSQL/Redis, migration recovery/preservation/drift were included.
+Process-outage event-stack and Compose hardening files were excluded to preserve
+the running live stack. No paid-provider microphone or deployment rebuild gate
+was performed. Step 1 is verified; Step 2 remains stopped pending the country PATCH
+consistency decision above. Handoff is still ignored; no historical live turn was
+modified, recovered or discarded.
+
+
+### Approved current-truth qualification and immigration intake (2026-10-07)
+
+This supersedes the rejected rigid country-conflict proposal above. Confirmed means
+currently confirmed by the caller, not immutable. The user explicitly approved the
+CALL boundary: reconnections retain the same call/protocol; a new call may revise
+any of the eight mutable qualification/intake fields, even within the same business
+conversation. Lead remains authoritative. No scoring weights, eligibility decisions,
+workflow ownership, provider routing or overall staged architecture were redesigned.
+
+Contract and persistence:
+- QualificationUpdate and internal ValidateProposals add optional call_id. The LLM
+  FactProposal/ProposedFacts/tool arguments cannot contain call IDs or statuses.
+  Conversation supplies identity from its admitted durable Message.call_id, never
+  from model output. Binding adds call-v1 provenance and the original call/turn to
+  evidence. Application/recovery reuse that frozen identity.
+- Existing qualification answer rows add call_id (current confirmed/conflicting
+  state origin), pending_value and pending_call_id. Within the same call, differing
+  confirmed information still follows the existing contradiction/explicit-resolution
+  protocol. Same-value provisional repetitions do not downgrade confirmed state.
+- On a later call, a provisional replacement is stored separately. Current confirmed
+  value/status/score remain authoritative; Lead's question asks to confirm the pending
+  value. Existing unresolved older-call conflicts also allow a normal later-call
+  candidate/confirmation without requiring the old conflict flag. A later explicitly
+  confirmed replacement atomically becomes current, clears pending/conflicting values,
+  updates call provenance and recalculates the existing baseline score.
+- The existing lead_score_history table adds answer_changes: before/after snapshots,
+  including values/status/conflict/pending and call/conversation identity, with the
+  originating turn. Snapshots are committed with the answer, score and normal outbox
+  receipt, including non-scoring intake updates. Raw values are not added to event
+  payloads, operational logs or rejection diagnostics. Existing transcripts/provenance
+  remain subject to their existing retention policy.
+- Additive migration f1a7c9e2b604 follows e8f2a6b3c901; no new tables. A one-time backfill
+  reads committed Lead receipts and Conversation's admitted message identity to recover
+  old call provenance where available. Seeded/redacted/unmatched historical rows retain
+  unknown origin rather than fabricated IDs. Runtime service ownership remains separate.
+  Pre-upgrade BOUND turns lack the call-v1 marker and retain the old update hash/semantics;
+  old receipt hashes/events are never rewritten. New call-scoped receipts include call_id
+  in their identity, preventing replay under another call.
+
+Intake and PATCH semantics:
+- target_country and visa_type are explicitly supported proposal fields with bounded
+  1–80 character named values and verbatim caller evidence. US/USA/U.S./United States
+  normalize to united states; UK aliases normalize to united kingdom. Other destinations
+  retain the named text. H1B/H-1B normalize to h-1b (similarly F1/f-1); named immigration
+  routes are intake preferences, not proof of eligibility or a visa taxonomy.
+- The conservative evidence/confirmation protocol remains: unmatched, negated or uncertain
+  assertions are rejected; normal assertions are provisional; explicit current caller
+  'I confirm ...' statements are required for confirmation. They must actually contain the
+  proposed destination/visa and an appropriate destination/visa/route assertion.
+- Both intake fields remain outside FIELD_WEIGHTS, six-field completeness, classification
+  and the 0–60 score. Existing intake candidates/conflicts receive backend confirmation
+  questions, but absent optional intake fields do not expand the six-field questionnaire.
+  The Lead-selected question remains the response fallback.
+- Caller-confirmed country is mirrored atomically to existing Lead.target_country with
+  its existing version check/outbox pattern. Lead PATCH stays an operator/profile metadata
+  update: it has no caller evidence, does not create or mutate caller-confirmed answers,
+  and cannot change their score. Profile metadata may differ after an operator edit;
+  qualification answers remain authoritative for caller-confirmed information. Extraction
+  and spoken-response instructions explicitly distinguish these sources.
+
+Verification and activation:
+- Focused tests cover all eight old→candidate→confirmed revisions in later calls within
+  the same conversation, false/zero values, reconnection/same-call conflict resolution,
+  old conflicts revised on new calls, history snapshots, frozen receipt recovery, duplicate
+  application, lost acknowledgement, transaction rollback, PATCH non-confirmation and
+  the original 'I want to go to USA and I need H1B visa' two-field provisional intake.
+- Evidence tests cover aliases, invented/mismatched/uncertain/negative/oversized intake
+  values and attempts to inject call identity. Migration checks include trusted historical
+  call backfill, preserved receipt hash/value, reversibility and metadata/default drift.
+- Source changes remain uncommitted. Live data, historical pending turns and running
+  services have not been changed. PROJECT_HANDOFF.md remains ignored/untracked.
+- To activate after ending live calls: build db-migrate, lead-service, conversation-service,
+  api-gateway and dashboard; run `docker compose run --rm db-migrate`; recreate those four
+  serving services and refresh the browser. Running new ORM code against the old schema
+  will fail, so migration is required before serving the new code. Paid-provider microphone
+  smoke testing remains a separate live verification.
+
+
+Final current-truth/intake gate: **664 Python tests passed, 1 deployment-only skip**
+(151.50s), including all 8 opt-in Chrome dashboard/voice cases, real WebRTC with
+synthetic audio, PostgreSQL/Redis, and migration backfill/preservation/round-trip/drift.
+Ruff lint and format (158 files), strict mypy (133 sources), single Alembic head and
+Git whitespace checks pass. Ten existing third-party deprecation warnings remain.
+An earlier push-to-talk browser timing timeout passed on isolated retry and in the
+final full gate. The added migration fixture was corrected for SQL JSON construction
+and the existing required preferred_language column; no schema defaults were weakened.
+Live-stack process-outage/Compose-hardening files were excluded, and no paid-provider
+microphone or deployment rebuild was performed. The isolated qualification test DB
+was removed after verification. Existing .env.example and concurrently added .gitignore
+changes were preserved. Handoff remains ignored/untracked; changes are uncommitted.

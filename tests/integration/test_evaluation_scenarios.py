@@ -137,7 +137,9 @@ async def evaluate_step(dialogue: QualifiedDialogue, step: Step) -> None:
     value = answer.conflict_value if step.status == "CONTRADICTORY" else answer.value
     assert value == step.value and type(value) is type(step.value)
     assert context.plan.next_field == step.next_field
-    assert output == context.plan.next_question
+    assert context.plan.next_question is not None
+    assert output == "Thanks, that helps. " + context.plan.next_question
+    assert output.count("?") <= 1
     assert dialogue.llm.health()[0].failover_count == 1
     assert all(r.conversation_id == dialogue.cid for r in fallback.requests)
     # Stale admission replay + simultaneous apply retries use the same durable receipt.

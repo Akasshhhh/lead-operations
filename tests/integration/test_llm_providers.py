@@ -151,6 +151,74 @@ async def test_vendor_text_fragmentation_usage_identity_and_cleanup(vendor: str)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("model", ["gpt-5-mini", "gpt-5-mini-2025-08-07"])
+async def test_gpt5_mini_uses_supported_parameters_and_keeps_tool_stream_contract(
+    model: str,
+) -> None:
+    data = request(tools=True)
+    body = Body(
+        frame(
+            delta(
+                {
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "lookup-1",
+                            "type": "function",
+                            "function": {"name": "lookup", "arguments": "{}"},
+                        }
+                    ]
+                }
+            )
+        )
+        + frame(delta({}, "tool_calls"))
+        + frame(usage_frame("openai", "tool_calls"))
+        + frame("[DONE]")
+    )
+
+    def handler(incoming: httpx.Request) -> httpx.Response:
+        payload = json.loads(incoming.content)
+        # Model the real API rejection that left a user turn pending.
+        if "temperature" in payload:
+            return httpx.Response(400, json={"error": {"param": "temperature"}})
+        assert payload["model"] == model
+        assert payload["reasoning_effort"] == "minimal"
+        assert payload["max_completion_tokens"] == data.max_output_tokens
+        assert payload["tools"][0]["function"]["name"] == "lookup"
+        assert payload["messages"][1]["content"] == "Hello"
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await ConversationLLMRuntime(
+            OpenAILLMProvider(client, api_key="test", model=model)
+        ).generate(data)
+    assert len(result.tool_calls) == 1 and result.tool_calls[0].name == "lookup"
+    assert result.tool_calls[0].id == "lookup-1" and result.finish_reason == "tool_calls"
+    assert body.closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "vendor,model",
+    [
+        ("openai", "gpt-4.1-mini-2025-04-14"),
+        ("openrouter", "meta-llama/llama-3.3-70b-instruct"),
+        ("openrouter", "openai/gpt-5-mini"),
+    ],
+)
+async def test_other_configured_models_keep_their_existing_sampling_contract(
+    vendor: str, model: str
+) -> None:
+    async with httpx.AsyncClient() as client:
+        provider = (OpenAILLMProvider if vendor == "openai" else OpenRouterLLMProvider)(
+            client, api_key="test", model=model
+        )
+        payload = provider.payload(request())
+    assert payload["temperature"] == 0
+    assert "reasoning_effort" not in payload
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("vendor", ["openai", "openrouter"])
 async def test_fragmented_parallel_tool_calls_and_history(vendor: str) -> None:
     calls = (

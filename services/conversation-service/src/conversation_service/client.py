@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from voice_platform_config import SERVICE_TOKEN_HEADER
 from voice_platform_contracts.lead import QualificationResponse, QualificationUpdate
 from voice_platform_contracts.qualification import (
+    ProposalRejection,
     QualificationPlan,
     ValidatedFacts,
     ValidateProposals,
@@ -24,10 +25,13 @@ class LeadServiceUnavailableError(RuntimeError):
 class LeadServiceResponseError(RuntimeError):
     """Raised for a controlled Lead Service response."""
 
-    def __init__(self, status_code: int, detail: str) -> None:
+    def __init__(
+        self, status_code: int, detail: str, rejection: ProposalRejection | None = None
+    ) -> None:
         super().__init__(detail)
         self.status_code = status_code
         self.detail = detail
+        self.rejection = rejection
 
 
 class LeadServiceClient:
@@ -60,7 +64,15 @@ class LeadServiceClient:
                 422: "invalid qualification update",
             }
             if response.status_code in messages:
-                raise LeadServiceResponseError(response.status_code, messages[response.status_code])
+                rejection = None
+                if response.status_code == 422:
+                    try:
+                        rejection = ProposalRejection.model_validate(response.json()["rejection"])
+                    except (ValueError, KeyError, TypeError):
+                        pass  # An unclassified rejection must not bypass validation.
+                raise LeadServiceResponseError(
+                    response.status_code, messages[response.status_code], rejection
+                )
             raise LeadServiceUnavailableError("lead service unavailable")
         if response.status_code != 200:
             raise LeadServiceUnavailableError("unexpected lead service response")
@@ -105,10 +117,13 @@ class LeadServiceClient:
         payload = await self.request("GET", f"/v1/leads/{lead_id}", request_id=request_id)
         return cast(dict[str, Any], payload)
 
-    async def plan(self, lead_id: UUID, request_id: str) -> QualificationPlan:
-        payload = await self.request(
-            "GET", f"/v1/leads/{lead_id}/qualification/plan", request_id=request_id
-        )
+    async def plan(
+        self, lead_id: UUID, request_id: str, call_id: UUID | None = None
+    ) -> QualificationPlan:
+        path = f"/v1/leads/{lead_id}/qualification/plan"
+        if call_id is not None:
+            path += f"?call_id={call_id}"
+        payload = await self.request("GET", path, request_id=request_id)
         try:
             result = QualificationPlan.model_validate(payload)
         except ValidationError:

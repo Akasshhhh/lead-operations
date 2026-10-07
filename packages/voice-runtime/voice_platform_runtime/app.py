@@ -1,6 +1,7 @@
 """Gateway-mounted SmallWebRTC signaling and bounded media-session ownership."""
 
 import asyncio
+import os
 import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
@@ -45,6 +46,17 @@ from .processor import CommandFrame, VoiceProcessor
 from .qualified import QualifiedDialogue
 
 
+class RuntimeVADParams(VADParams):
+    min_volume: float = Field(default=0.65, ge=0, le=1)
+    stop_secs: float = 0.4
+
+
+def configured_vad_params() -> RuntimeVADParams:
+    return RuntimeVADParams.model_validate(
+        {"min_volume": os.getenv("VOICE_VAD_MIN_VOLUME", "0.65")}
+    )
+
+
 class SessionCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     conversation_id: UUID
@@ -84,6 +96,7 @@ class Session:
         self.id = uuid4()
         self.token = secrets.token_urlsafe(32)
         self.data = data
+        self.vad_params = configured_vad_params()
         self.backend = backend
         self.telemetry = Telemetry("voice-session")
         self.faults = Faults(self.telemetry)
@@ -208,10 +221,8 @@ class Session:
                 await self.notify({"type": "connected", "call_id": str(self.data.call_id)})
                 if self.worker is not None:
                     await self.worker.queue_frame(CommandFrame("greet"))
-            except (DependencyError, LLMError, SpeechError):
-                await self.notify(
-                    {"type": "error", "code": "dependency_unavailable", "retry_required": True}
-                )
+            except (DependencyError, LLMError, SpeechError) as exc:
+                await self.notify({"type": "error", "code": exc.code, "retry_required": True})
 
     async def disconnected(self) -> None:
         await self.processor.halt()
@@ -228,8 +239,8 @@ class Session:
                         self.id,
                         "transport_disconnect",
                     )
-                except DependencyError:
-                    await self.notify({"type": "error", "code": "dependency_unavailable"})
+                except DependencyError as exc:
+                    await self.notify({"type": "error", "code": exc.code})
 
     async def offer(self, data: Offer) -> dict[str, str]:
         # Route serialization is independent from transport callbacks' lifecycle lock.
@@ -270,9 +281,7 @@ class Session:
                 pipeline = Pipeline(
                     [
                         transport.input(),
-                        VADProcessor(
-                            vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.4))
-                        ),
+                        VADProcessor(vad_analyzer=SileroVADAnalyzer(params=self.vad_params)),
                         self.processor,
                         transport.output(),
                     ]
@@ -334,10 +343,8 @@ class Session:
     async def finish_workflow_media(self) -> None:
         try:
             await self.close()
-        except DependencyError:
-            await self.notify(
-                {"type": "error", "code": "dependency_unavailable", "retry_required": True}
-            )
+        except DependencyError as exc:
+            await self.notify({"type": "error", "code": exc.code, "retry_required": True})
 
     async def close(self, *, failed: bool = False) -> None:
         self.ending = True
@@ -400,6 +407,7 @@ def create_app(conversation_url: str, token: str | None) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         speech = SpeechSettings.from_env()
         llm = LLMSettings.from_env()
+        configured_vad_params()  # Reject invalid thresholds before accepting calls.
         async with (
             httpx.AsyncClient(
                 base_url=conversation_url, timeout=5, follow_redirects=False

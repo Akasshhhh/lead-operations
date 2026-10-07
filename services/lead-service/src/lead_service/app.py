@@ -183,7 +183,14 @@ def create_app(
     ) -> JSONResponse:
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            content={"detail": f"invalid qualification fact: {exc}"},
+            content={
+                "detail": f"invalid qualification fact: {exc}",
+                "rejection": {
+                    "source": "lead_validation",
+                    "code": exc.code,
+                    "field_key": exc.field_key,
+                },
+            },
         )
 
     @app.get("/health", response_model=HealthResponse, dependencies=[Depends(verify_service_auth)])
@@ -303,9 +310,11 @@ def create_app(
         dependencies=[Depends(verify_service_auth)],
     )
     async def get_plan(
-        lead_id: UUID, session: AsyncSession = Depends(get_session, scope="function")
+        lead_id: UUID,
+        call_id: UUID | None = None,
+        session: AsyncSession = Depends(get_session, scope="function"),
     ) -> QualificationPlan:
-        return qualification_plan(await get_qualification(lead_id, session))
+        return qualification_plan(await get_qualification(lead_id, session), call_id)
 
     @app.post(
         "/v1/leads/{lead_id}/qualification/validate",
@@ -322,9 +331,14 @@ def create_app(
         for proposal in data.proposals:
             if proposal.resolve_conflict and (
                 proposal.field_key not in answers
-                or answers[proposal.field_key].answer_status != "CONTRADICTORY"
+                or (
+                    answers[proposal.field_key].answer_status != "CONTRADICTORY"
+                    and (
+                        data.call_id is None or answers[proposal.field_key].call_id == data.call_id
+                    )
+                )
             ):
-                raise QualificationValidationError(proposal.field_key)
+                raise QualificationValidationError(proposal.field_key, "conflict_not_present")
         return validate_proposals(data)
 
     @app.post(

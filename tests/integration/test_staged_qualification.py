@@ -1,6 +1,7 @@
 """Real PostgreSQL/Lead boundary, staged recovery, and tool-driven qualification."""
 
 import asyncio
+import json
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -363,7 +364,8 @@ class ToolProvider:
             )
             yield CompletionEvent(finish_reason="tool_calls")
         else:
-            yield TextDelta(text="Here is the next question.")
+            plan = json.loads(request.context.messages[-1].content)
+            yield TextDelta(text="Thanks, that helps. " + (plan["next_question"] or ""))
             yield CompletionEvent(finish_reason="stop")
 
 
@@ -722,7 +724,7 @@ async def test_pending_staged_turn_blocks_overtaking_output_and_other_turns(syst
     assert conflict.status_code == 409
 
 
-async def test_invalid_extraction_can_be_retried_but_frozen_facts_cannot_change(
+async def test_invalid_extraction_finishes_without_facts_and_next_turn_can_correct(
     system: System,
 ) -> None:
     await transition_to_greeting(system)
@@ -734,13 +736,16 @@ async def test_invalid_extraction_can_be_retried_but_frozen_facts_cannot_change(
         system.conversation_id,
         system.call_id,
     )
-    with pytest.raises(DependencyError) as error:
-        await dialogue.reply(text, uuid4())
-    assert error.value.status == 422
-    assert dialogue.proposal is None and dialogue.pending is not None
+    await dialogue.reply(text, uuid4())
+    assert dialogue.proposal is None and dialogue.pending is None
+    qualification = await dialogue.backend.qualification_context(dialogue.cid, uuid4())
+    assert qualification.plan.qualification.score is None
     provider.proposed = proposals(text)["proposals"]
-    await dialogue.recover()
+    await dialogue.reply(text, uuid4())
     assert dialogue.pending is None
+    qualification = await dialogue.backend.qualification_context(dialogue.cid, uuid4())
+    assert qualification.plan.qualification.score is not None
+    assert qualification.plan.qualification.score.score == 10
 
 
 async def test_repeated_tool_ids_and_unbounded_loops_stop_after_durable_application(

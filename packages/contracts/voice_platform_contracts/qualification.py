@@ -16,6 +16,8 @@ QualificationField = Literal[
     "has_job_offer",
     "budget_ready",
     "urgency",
+    "target_country",
+    "visa_type",
 ]
 
 
@@ -47,20 +49,42 @@ class FactProposal(BoundedInput):
     resolve_conflict: bool = False
 
 
+class ProposalRejection(BoundedInput):
+    source: Literal["extraction", "lead_validation"]
+    code: Literal[
+        "invalid_proposal",
+        "invalid_value",
+        "invalid_evidence",
+        "confirmation_required",
+        "conflict_not_present",
+    ]
+    field_key: QualificationField | None = None
+
+
 class ProposedFacts(BoundedInput):
-    proposals: list[FactProposal] = Field(default_factory=list, max_length=6)
+    proposals: list[FactProposal] = Field(default_factory=list, max_length=8)
     provider: str = Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9_-]+$")
     model: str = Field(min_length=1, max_length=128)
+    on_rejection: Literal["reject", "continue_without_facts"] = "reject"
+    extraction_rejection: ProposalRejection | None = None
 
     @model_validator(mode="after")
     def unique_fields(self) -> Self:
         keys = [proposal.field_key for proposal in self.proposals]
         if len(keys) != len(set(keys)):
             raise ValueError("duplicate field")
+        if self.extraction_rejection is not None and (
+            self.proposals
+            or self.on_rejection != "continue_without_facts"
+            or self.extraction_rejection.source != "extraction"
+        ):
+            raise ValueError("extraction rejection requires an empty continuation batch")
         return self
 
 
 class ValidateProposals(ProposedFacts):
+    # Internal service provenance; deliberately absent from LLM proposal arguments.
+    call_id: UUID | None = None
     user_text: str = Field(min_length=1, max_length=20_000)
 
 

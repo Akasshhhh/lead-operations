@@ -261,6 +261,7 @@ test("microphone denial is explicit and does not create a replacement conversati
     });
   });
   await page.goto(`/?lead=${leadId}`);
+  await expect(page.getByLabel("Push-to-talk")).not.toBeChecked();
   await page
     .getByRole("button", { name: "Start / resume call", exact: false })
     .click();
@@ -290,81 +291,159 @@ test("mobile layout shows evaluation command and gates unavailable fault control
   ).toBe(true);
 });
 
-test("push-to-talk waits for backend readiness after WebRTC connects", async ({
-  page,
-}) => {
-  await mockDashboard(page);
-  let ready = false;
-  await page.route("**/api/voice/**", (route) => {
-    const path = new URL(route.request().url()).pathname;
-    const body = path.endsWith("/offer")
-      ? { sdp: "fixture", type: "answer", pc_id: "fixture-peer" }
-      : path.endsWith("/status")
-        ? {
-            ready,
-            pending_operation: false,
-            closed: false,
-            ending: false,
-            providers: { llm: [], stt: [], tts: [] },
-            media_state: "connected",
-            speech_mode: "mock",
-            llm_mode: "mock",
+for (const manual of [false, true]) {
+  test(`${manual ? "push-to-talk" : "automatic voice"} respects readiness and recoverable errors`, async ({
+    page,
+  }) => {
+    await mockDashboard(page);
+    let ready = false;
+    await page.route("**/api/voice/**", (route) => {
+      const path = new URL(route.request().url()).pathname;
+      if (path.endsWith("/sessions") && route.request().method() === "POST") {
+        expect(route.request().postDataJSON().manual_turns).toBe(manual);
+      }
+      const body = path.endsWith("/offer")
+        ? { sdp: "fixture", type: "answer", pc_id: "fixture-peer" }
+        : path.endsWith("/status")
+          ? {
+              ready,
+              pending_operation: false,
+              closed: false,
+              ending: false,
+              providers: { llm: [], stt: [], tts: [] },
+              media_state: "connected",
+              speech_mode: "mock",
+              llm_mode: "mock",
+            }
+          : {
+              session_id: "fixture-session",
+              token: "fixture-capability",
+              speech_mode: "mock",
+              llm_mode: "mock",
+            };
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(body),
+      });
+    });
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "mediaDevices", {
+        value: {
+          getUserMedia: async () => ({
+            getTracks: () => [{ readyState: "live", stop() {} }],
+          }),
+        },
+      });
+      Object.defineProperty(window, "RTCPeerConnection", {
+        value: class {
+          connectionState = "connected";
+          iceGatheringState = "complete";
+          localDescription: unknown = null;
+          onconnectionstatechange: (() => void) | null = null;
+          addTrack() {}
+          createDataChannel() {
+            const channel = {
+              readyState: "open",
+              send() {},
+              onmessage: null as ((event: MessageEvent) => void) | null,
+            };
+            Object.assign(window, { voiceTestChannel: channel });
+            return channel;
           }
-        : {
-            session_id: "fixture-session",
-            token: "fixture-capability",
-            speech_mode: "mock",
-            llm_mode: "mock",
-          };
-    return route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify(body),
+          async createOffer() {
+            return { sdp: "fixture", type: "offer" };
+          }
+          async setLocalDescription(data: unknown) {
+            this.localDescription = data;
+          }
+          async setRemoteDescription() {
+            this.onconnectionstatechange?.();
+          }
+          close() {}
+        },
+      });
     });
-  });
-  await page.addInitScript(() => {
-    Object.defineProperty(navigator, "mediaDevices", {
-      value: {
-        getUserMedia: async () => ({
-          getTracks: () => [{ readyState: "live", stop() {} }],
+    await page.goto(`/?lead=${leadId}`);
+    await expect(page.getByLabel("Push-to-talk")).not.toBeChecked();
+    if (manual) await page.getByLabel("Push-to-talk").check();
+    await page
+      .getByRole("button", { name: "Start / resume call", exact: false })
+      .click();
+    const start = page.getByRole("button", {
+      name: "Start speaking",
+      exact: false,
+    });
+    if (manual) await expect(start).toBeDisabled();
+    else await expect(start).toHaveCount(0);
+    await page.waitForFunction(() =>
+      Boolean(
+        (window as unknown as { voiceTestChannel?: { onmessage?: unknown } })
+          .voiceTestChannel?.onmessage,
+      ),
+    );
+    ready = true;
+    if (manual) await expect(start).toBeEnabled({ timeout: 10000 });
+    else
+      await expect(
+        page.getByText("Automatic voice activity detection", { exact: true }),
+      ).toBeVisible();
+    await page.evaluate(() => {
+      const channel = (
+        window as unknown as {
+          voiceTestChannel: { onmessage: (event: MessageEvent) => void };
+        }
+      ).voiceTestChannel;
+      channel.onmessage(
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            type: "error",
+            code: "invalid_output",
+            retry_required: false,
+          }),
         }),
-      },
+      );
     });
-    Object.defineProperty(window, "RTCPeerConnection", {
-      value: class {
-        connectionState = "connected";
-        iceGatheringState = "complete";
-        localDescription: unknown = null;
-        onconnectionstatechange: (() => void) | null = null;
-        addTrack() {}
-        createDataChannel() {
-          return { readyState: "open", send() {} };
+    await expect(page.getByText(/Please try speaking again/)).toBeVisible();
+    if (manual) await expect(start).toBeEnabled();
+    await page.evaluate(() => {
+      const channel = (
+        window as unknown as {
+          voiceTestChannel: { onmessage: (event: MessageEvent) => void };
         }
-        async createOffer() {
-          return { sdp: "fixture", type: "offer" };
-        }
-        async setLocalDescription(data: unknown) {
-          this.localDescription = data;
-        }
-        async setRemoteDescription() {
-          this.onconnectionstatechange?.();
-        }
-        close() {}
-      },
+      ).voiceTestChannel;
+      for (const event of [
+        { type: "qualification_rejected" },
+        { type: "error", code: "operation_rejected", retry_required: false },
+      ])
+        channel.onmessage(
+          new MessageEvent("message", { data: JSON.stringify(event) }),
+        );
     });
+    await expect(page.getByText(/Your words were saved/)).toBeVisible();
+    await expect(page.getByText(/The request was rejected/)).toBeVisible();
+    await expect(page.getByText(/after the dependency returns/)).toHaveCount(0);
+    if (manual) await expect(start).toBeEnabled();
+    await page.evaluate(() => {
+      const channel = (
+        window as unknown as {
+          voiceTestChannel: { onmessage: (event: MessageEvent) => void };
+        }
+      ).voiceTestChannel;
+      channel.onmessage(
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            type: "error",
+            code: "dependency_unavailable",
+            retry_required: true,
+          }),
+        }),
+      );
+    });
+    await expect(page.getByText(/Recover the saved operation/)).toBeVisible();
+    if (manual) await expect(start).toBeDisabled();
   });
-  await page.goto(`/?lead=${leadId}`);
-  await page
-    .getByRole("button", { name: "Start / resume call", exact: false })
-    .click();
-  await expect(
-    page.getByRole("button", { name: "Start speaking", exact: false }),
-  ).toBeDisabled();
-  ready = true;
-  await expect(
-    page.getByRole("button", { name: "Start speaking", exact: false }),
-  ).toBeEnabled({ timeout: 10000 });
-});
+}
 
 test("same-origin server proxy rejects unsupported routes and cross-origin mutations", async ({
   request,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -32,6 +33,13 @@ class ScoreResult:
 
 def valid_field_value(field_key: str, value: object) -> bool:
     """Return whether a supported baseline field has a valid known value."""
+    # Intake values are validated here but deliberately absent from FIELD_WEIGHTS.
+    if field_key in {"target_country", "visa_type"}:
+        return (
+            isinstance(value, str)
+            and 1 <= len(value) <= 80
+            and bool(re.fullmatch(r"[a-zA-Z][a-zA-Z0-9 .'-]*", value))
+        )
     if field_key == "education_level":
         return isinstance(value, str) and value.strip().lower() in _EDUCATION
     if field_key == "years_experience":

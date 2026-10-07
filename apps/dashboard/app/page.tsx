@@ -98,7 +98,7 @@ export default function Dashboard() {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [manual, setManual] = useState(true);
+  const [manual, setManual] = useState(false);
   const [speaking, setSpeaking] = useState(false);
   const [agentReady, setAgentReady] = useState(false);
   const [media, setMedia] = useState("idle");
@@ -462,15 +462,30 @@ export default function Dashboard() {
         setAgentReady(true);
       }
       if (event.type === "error") {
-        setAgentReady(false);
-        setRetryRequired(Boolean(event.retry_required));
+        const needsRecovery = Boolean(event.retry_required);
+        setAgentReady(
+          !needsRecovery && voice.current?.channel?.readyState === "open",
+        );
+        setSpeaking(false);
+        setRetryRequired(needsRecovery);
         setError(
           "voice",
           new Error(
-            `Voice operation: ${String(event.code)}. Use recovery after the dependency returns.`,
+            `Voice operation: ${String(event.code)}. ` +
+              (event.code === "dependency_unavailable" && needsRecovery
+                ? "Recover the saved operation after the dependency returns."
+                : needsRecovery
+                  ? "Saved work needs recovery. Use Recover operation; if it is rejected again, check the operation diagnostics."
+                  : event.code === "operation_rejected"
+                    ? "The request was rejected. Please clarify and try again."
+                    : "Please try speaking again; this operation has no saved work to recover."),
           ),
         );
       }
+      if (event.type === "qualification_rejected")
+        setNotice(
+          "Your words were saved. No qualification details were changed for this turn.",
+        );
       if (event.type === "ready" || event.type === "recovered") {
         setAgentReady(true);
         setError("voice");

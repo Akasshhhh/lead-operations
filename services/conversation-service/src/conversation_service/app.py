@@ -48,6 +48,7 @@ from voice_platform_contracts.qualification import (
     ProposedFacts,
     QualificationContext,
     StagedTurnCreate,
+    ValidatedFacts,
     ValidateProposals,
 )
 from voice_platform_contracts.workflow import (
@@ -566,7 +567,8 @@ def create_app(
     ) -> QualificationContext:
         async with session.begin():
             current = await ConversationService(session).get_conversation(conversation_id)
-        plan = await lead.plan(current.lead_id, request_id(request))
+            active = await ConversationService(session).active_call(conversation_id)
+        plan = await lead.plan(current.lead_id, request_id(request), active.id if active else None)
         try:
             profile = LeadResponse.model_validate(
                 await lead.get_lead(lead_id=current.lead_id, request_id=request_id(request))
@@ -615,13 +617,39 @@ def create_app(
             message = await service.message(conversation_id, turn_id)
             current = await service.get_conversation(conversation_id)
         # Validation has no side effects. Re-lock and compare the receipt after HTTP.
-        validated = await lead.validate(
-            current.lead_id,
-            ValidateProposals(**data.model_dump(), user_text=message.text),
-            request_id(request),
-        )
+        rejection = data.extraction_rejection
+        try:
+            validated = await lead.validate(
+                current.lead_id,
+                ValidateProposals(
+                    **data.model_dump(), user_text=message.text, call_id=message.call_id
+                ),
+                request_id(request),
+            )
+        except LeadServiceResponseError as exc:
+            if (
+                data.on_rejection != "continue_without_facts"
+                or exc.status_code != 422
+                or exc.rejection is None
+                or exc.rejection.source != "lead_validation"
+            ):
+                raise
+            rejection = exc.rejection
+            validated = ValidatedFacts(facts=[], provenance=[])
         async with session.begin():
-            message = await service.bind(conversation_id, turn_id, data, validated)
+            message = await service.bind(conversation_id, turn_id, data, validated, rejection)
+        if rejection is not None:
+            telemetry.record(
+                "qualification.proposal",
+                rejection.code,
+                0,
+                request_id=request_id(request),
+                conversation_id=str(conversation_id),
+                turn_id=str(turn_id),
+                field_key=rejection.field_key or "none",
+                provider=data.provider,
+                model=data.model,
+            )
         return _message_response(message)
 
     @app.post(
@@ -660,6 +688,9 @@ def create_app(
                     data=QualificationUpdate(
                         conversation_id=conversation_id,
                         turn_id=turn_id,
+                        call_id=message.call_id
+                        if metadata.get("call_provenance") == "call-v1"
+                        else None,
                         expected_profile_version=qualification.version,
                         facts=facts,
                     ),

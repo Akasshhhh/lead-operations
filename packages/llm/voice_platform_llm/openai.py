@@ -65,6 +65,11 @@ class OpenAILLMProvider(HTTPProvider):
             "temperature": request.temperature,
             "store": False,
         }
+        if self.name == "openai" and self.model in {"gpt-5-mini", "gpt-5-mini-2025-08-07"}:
+            # GPT-5 mini rejects temperature. Minimal reasoning fits the existing
+            # bounded voice-turn budget without changing domain/tool ownership.
+            payload.pop("temperature", None)
+            payload["reasoning_effort"] = "minimal"
         if request.tools:
             payload["tools"] = [
                 {

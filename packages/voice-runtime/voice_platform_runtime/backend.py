@@ -35,6 +35,14 @@ class DependencyError(RuntimeError):
         super().__init__("conversation operation unavailable")
         self.status = status
 
+    @property
+    def code(self) -> str:
+        return {
+            404: "operation_not_found",
+            409: "operation_conflict",
+            422: "operation_rejected",
+        }.get(self.status, "dependency_unavailable")
+
 
 class Backend:
     def __init__(self, client: httpx.AsyncClient, token: str | None, timeout: float = 5) -> None:

@@ -48,6 +48,10 @@ class QualificationIdempotencyConflictError(ValueError):
 class QualificationValidationError(ValueError):
     """Raised when a supported qualification fact is not valid for its field."""
 
+    def __init__(self, field_key: str, code: str = "invalid_value") -> None:
+        super().__init__(field_key)
+        self.field_key, self.code = field_key, code
+
 
 @dataclass(frozen=True, slots=True)
 class LeadList:
@@ -117,18 +121,34 @@ class LeadService:
         score = await self.session.get(LeadScore, lead_id)
         return QualificationData(profile=profile, answers=answers, score=score)
 
+    @staticmethod
+    def _answer_snapshot(answer: QualificationAnswer) -> dict[str, object]:
+        return {
+            "value": answer.value,
+            "status": answer.answer_status,
+            "conflict_value": answer.conflict_value,
+            "pending_value": answer.pending_value,
+            "call_id": str(answer.call_id) if answer.call_id else None,
+            "pending_call_id": str(answer.pending_call_id) if answer.pending_call_id else None,
+            "conversation_id": str(answer.conversation_id) if answer.conversation_id else None,
+            "source": answer.source,
+        }
+
     async def apply_qualification_update(
         self, lead_id: UUID, data: QualificationUpdate
     ) -> QualificationData:
         """Apply validated live facts and recalculate the authoritative score atomically."""
         serialized_facts = [fact.model_dump(mode="json") for fact in data.facts]
+        identity = {
+            "lead_id": str(lead_id),
+            "conversation_id": str(data.conversation_id),
+            "facts": sorted(serialized_facts, key=lambda fact: fact["field_key"]),
+        }
+        if data.call_id is not None:
+            identity["call_id"] = str(data.call_id)
         request_hash = hashlib.sha256(
             json.dumps(
-                {
-                    "lead_id": str(lead_id),
-                    "conversation_id": str(data.conversation_id),
-                    "facts": sorted(serialized_facts, key=lambda fact: fact["field_key"]),
-                },
+                identity,
                 sort_keys=True,
                 separators=(",", ":"),
             ).encode()
@@ -157,7 +177,8 @@ class LeadService:
             payload = existing_event.payload
             if (
                 not isinstance(payload, dict)
-                or payload.get("request_hash") not in {request_hash, legacy_hash}
+                or payload.get("request_hash")
+                not in ({request_hash, legacy_hash} if data.call_id is None else {request_hash})
                 or payload.get("lead_id") != str(lead_id)
                 or payload.get("conversation_id") != str(data.conversation_id)
             ):
@@ -179,11 +200,15 @@ class LeadService:
             .all()
         )
         by_key = {answer.field_key: answer for answer in answers}
+        answer_changes = []
         for fact in data.facts:
-            if fact.field_key in FIELD_WEIGHTS and fact.status == "CONFIRMED":
+            if fact.field_key in {*FIELD_WEIGHTS, "target_country", "visa_type"}:
                 if not valid_field_value(fact.field_key, fact.value):
                     raise QualificationValidationError(fact.field_key)
+            if fact.resolve_conflict and fact.status != "CONFIRMED":
+                raise QualificationValidationError(fact.field_key, "confirmation_required")
             answer = by_key.get(fact.field_key)
+            previous = self._answer_snapshot(answer) if answer is not None else None
             if answer is None:
                 answer = QualificationAnswer(
                     qualification_profile_id=profile.id,
@@ -194,25 +219,64 @@ class LeadService:
                 by_key[fact.field_key] = answer
 
             same_value = answer.value == fact.value
-            if fact.status == "CONTRADICTORY":
-                answer.answer_status = "CONTRADICTORY"
-                answer.conflict_value = fact.value
-            elif (
-                answer.answer_status == "CONFIRMED" and not same_value and not fact.resolve_conflict
-            ):
-                answer.answer_status = "CONTRADICTORY"
-                answer.conflict_value = fact.value
-            elif answer.answer_status == "CONTRADICTORY" and not fact.resolve_conflict:
-                answer.conflict_value = fact.value
-            else:
-                answer.value = fact.value
-                answer.conflict_value = None
-                answer.answer_status = fact.status
-            answer.confidence = (
-                Decimal(str(fact.confidence)) if fact.confidence is not None else None
+            later_call = data.call_id is not None and answer.call_id != data.call_id
+            preserve_current = fact.status == "PROVISIONAL" and (
+                (answer.answer_status == "CONFIRMED" and same_value)
+                or (later_call and answer.answer_status in {"CONFIRMED", "CONTRADICTORY"})
             )
-            answer.source = "CONVERSATION"
-            answer.conversation_id = data.conversation_id
+            if preserve_current:
+                # A later call's candidate is not the caller's authoritative current truth.
+                unchanged = same_value and answer.answer_status == "CONFIRMED"
+                answer.pending_value = None if unchanged else fact.value
+                answer.pending_call_id = None if unchanged else data.call_id
+            else:
+                if fact.status == "CONTRADICTORY":
+                    answer.answer_status = "CONTRADICTORY"
+                    answer.conflict_value = fact.value
+                elif later_call and fact.status == "CONFIRMED":
+                    answer.value = fact.value
+                    answer.conflict_value = None
+                    answer.answer_status = "CONFIRMED"
+                elif (
+                    answer.answer_status == "CONFIRMED"
+                    and not same_value
+                    and not fact.resolve_conflict
+                ):
+                    answer.answer_status = "CONTRADICTORY"
+                    answer.conflict_value = fact.value
+                elif answer.answer_status == "CONTRADICTORY" and not fact.resolve_conflict:
+                    answer.conflict_value = fact.value
+                else:
+                    answer.value = fact.value
+                    answer.conflict_value = None
+                    answer.answer_status = fact.status
+                answer.pending_value = None
+                answer.pending_call_id = None
+                answer.confidence = (
+                    Decimal(str(fact.confidence)) if fact.confidence is not None else None
+                )
+                answer.source = "CONVERSATION"
+                answer.conversation_id = data.conversation_id
+                answer.call_id = data.call_id
+                if fact.field_key == "target_country" and answer.answer_status == "CONFIRMED":
+                    # Profile metadata mirrors only a caller-confirmed destination.
+                    lead = await self.get_lead(lead_id)
+                    if lead.target_country != answer.value:
+                        await self.update_lead(
+                            lead_id,
+                            LeadUpdate(
+                                expected_version=lead.version, target_country=str(answer.value)
+                            ),
+                        )
+            answer_changes.append(
+                {
+                    "field_key": fact.field_key,
+                    "previous": previous,
+                    "current": self._answer_snapshot(answer),
+                    "call_id": str(data.call_id) if data.call_id else None,
+                    "turn_id": str(data.turn_id),
+                }
+            )
 
         await self.session.flush()
         result = evaluate_answers(list(by_key.values()))
@@ -236,6 +300,7 @@ class LeadService:
                 conversation_id=data.conversation_id,
                 previous_score=previous_score,
                 new_score=result.score,
+                answer_changes=answer_changes,
                 classification=result.classification,
                 reasons=result.reasons,
                 rule_version=RULE_VERSION,

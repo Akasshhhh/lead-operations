@@ -574,6 +574,16 @@ async def test_backend_output_policy_blocks_unsupported_claims(system: System) -
     for text, allowed in (
         ("You are guaranteed visa approval.", False),
         ("Your score is 60 and I booked an appointment.", False),
+        ("Next I will call get_missing_fields.", False),
+        ("get_lead_profile", False),
+        ("GET_QUALIFICATION", False),
+        ("`get_conversation_history`", False),
+        ('{"name": "propose_qualification", "arguments": {}}', False),
+        ("I will use request_workflow_action.", False),
+        ("Next is HUMAN_HANDOFF.", False),
+        ("FOLLOW_UP", False),
+        ("END_CONVERSATION", False),
+        ("We can collect the remaining details for a consultant to review.", True),
         ("How can I help?", True),
     ):
         response = await system.conversation.post(

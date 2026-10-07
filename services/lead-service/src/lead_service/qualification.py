@@ -1,6 +1,7 @@
 """Lead-owned answer validation and next-question policy, reusing baseline validation."""
 
 import re
+from uuid import UUID
 
 from pydantic import JsonValue
 from voice_platform_contracts.lead import QualificationFact, QualificationResponse
@@ -20,7 +21,27 @@ QUESTIONS = {
     "has_job_offer": "Do you currently have a job offer?",
     "budget_ready": "Is your budget for the process ready?",
     "urgency": "How urgent is your plan: low, medium, or high?",
+    "target_country": "Which country would you like to move to?",
+    "visa_type": "Which visa or immigration route are you interested in?",
 }
+
+COUNTRY_ALIASES = {
+    "united states": ("united states", "united states of america", "usa", "us", "u.s.", "u.s.a."),
+    "united kingdom": ("united kingdom", "uk", "u.k."),
+}
+
+
+def normalize_value(field: str, value: JsonValue) -> JsonValue:
+    if not isinstance(value, str):
+        return value
+    text = normalize(value)
+    if field == "target_country":
+        return next(
+            (country for country, aliases in COUNTRY_ALIASES.items() if text in aliases), text
+        )
+    if field == "visa_type" and re.fullmatch(r"[a-z]-?\d[a-z]?", text):
+        return text[0] + "-" + text[1:].lstrip("-")
+    return text
 
 
 def assertion(field: str, value: object) -> str:
@@ -31,6 +52,8 @@ def assertion(field: str, value: object) -> str:
         "has_job_offer": "I have a job offer" if value else "I have no job offer",
         "budget_ready": "my budget is ready" if value else "my budget is not ready",
         "urgency": f"my urgency is {value}",
+        "target_country": f"my target country is {value}",
+        "visa_type": f"my visa type is {value}",
     }[field]
 
 
@@ -43,6 +66,25 @@ def validates_evidence(field: str, value: object, evidence: str) -> bool:
     text = normalize(evidence)
     if re.search(r"\b(maybe|perhaps|might|not sure|unsure|if|hypothetically)\b", text):
         return False
+    if field == "target_country":
+        terms = COUNTRY_ALIASES.get(str(value), (str(value),))
+        return (
+            bool(
+                re.search(
+                    r"\b(?:country|destination|go|move|want|immigrate|immigration|target)\b", text
+                )
+            )
+            and any(re.search(rf"(?<!\w){re.escape(term)}(?!\w)", text) for term in terms)
+            and not re.search(r"\b(?:not|no|don't|do not)\b", text)
+        )
+    if field == "visa_type":
+        compact = re.sub(r"[-\s]", "", str(value))
+        pattern = r"[-\s]?".join(re.escape(char) for char in compact)
+        return (
+            bool(re.search(r"\b(?:visa|route)\b", text))
+            and bool(re.search(rf"(?<!\w){pattern}(?!\w)", text))
+            and not re.search(r"\b(?:not|no|don't|do not)\b", text)
+        )
     if field in {"has_job_offer", "budget_ready"}:
         subject = r"job offer" if field == "has_job_offer" else r"budget"
         if value is False:
@@ -81,15 +123,13 @@ def validate_proposals(data: ValidateProposals) -> ValidatedFacts:
     facts: list[QualificationFact] = []
     provenance: list[dict[str, JsonValue]] = []
     for proposal in data.proposals:
-        value = (
-            proposal.value.strip().lower() if isinstance(proposal.value, str) else proposal.value
-        )
-        if (
-            proposal.evidence not in data.user_text
-            or not valid_field_value(proposal.field_key, value)
-            or not validates_evidence(proposal.field_key, value, proposal.evidence)
+        value = normalize_value(proposal.field_key, proposal.value)
+        if not valid_field_value(proposal.field_key, value):
+            raise QualificationValidationError(proposal.field_key, "invalid_value")
+        if proposal.evidence not in data.user_text or not validates_evidence(
+            proposal.field_key, value, proposal.evidence
         ):
-            raise QualificationValidationError(proposal.field_key)
+            raise QualificationValidationError(proposal.field_key, "invalid_evidence")
         # Caller evidence is a quoted assertion, never a provider's confidence score.
         full_text = normalize(data.user_text)
         explicit = (
@@ -101,7 +141,7 @@ def validate_proposals(data: ValidateProposals) -> ValidatedFacts:
             )
         )
         if proposal.resolve_conflict and not explicit:
-            raise QualificationValidationError(proposal.field_key)
+            raise QualificationValidationError(proposal.field_key, "confirmation_required")
         facts.append(
             QualificationFact(
                 field_key=proposal.field_key,
@@ -122,27 +162,37 @@ def validate_proposals(data: ValidateProposals) -> ValidatedFacts:
     return ValidatedFacts(facts=facts, provenance=provenance)
 
 
-def qualification_plan(qualification: QualificationResponse) -> QualificationPlan:
+def qualification_plan(
+    qualification: QualificationResponse, call_id: UUID | None = None
+) -> QualificationPlan:
     answers = {answer.field_key: answer for answer in qualification.answers}
     missing = [key for key in FIELD_WEIGHTS if key not in answers]
+    fields = [*FIELD_WEIGHTS, "target_country", "visa_type"]
+    pending = {
+        key: answer.pending_value
+        for key, answer in answers.items()
+        if answer.pending_value is not None
+        and (call_id is None or answer.pending_call_id == call_id)
+    }
     contradictory = [
         key
-        for key in FIELD_WEIGHTS
-        if key in answers and answers[key].answer_status == "CONTRADICTORY"
+        for key in fields
+        if key in answers and key not in pending and answers[key].answer_status == "CONTRADICTORY"
     ]
     provisional = [
         key
-        for key in FIELD_WEIGHTS
+        for key in fields
         if key in answers
         and key not in contradictory
         and (
-            answers[key].answer_status != "CONFIRMED"
+            key in pending
+            or answers[key].answer_status != "CONFIRMED"
             or not valid_field_value(key, answers[key].value)
         )
     ]
     # Contradictions and existing unconfirmed facts take priority over an empty questionnaire.
     # Urgent callers discuss timing/budget before other still-missing background details.
-    order = list(FIELD_WEIGHTS)
+    order = fields
     if "urgency" in answers and answers["urgency"].value == "high":
         order = ["budget_ready", "has_job_offer"] + [
             k for k in order if k not in {"budget_ready", "has_job_offer"}
@@ -163,7 +213,7 @@ def qualification_plan(qualification: QualificationResponse) -> QualificationPla
             else QUESTIONS[field]
         )
     elif field in provisional:
-        value = answers[field].value
+        value = pending.get(field, answers[field].value)
         if valid_field_value(field, value):
             question = (
                 f"Please confirm: say 'I confirm {assertion(field, value)}', "

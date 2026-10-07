@@ -107,6 +107,9 @@ class QualificationAnswerResponse(BaseModel):
     source: str
     conversation_id: UUID | None
     updated_at: datetime
+    call_id: UUID | None = None
+    pending_value: object | None = None
+    pending_call_id: UUID | None = None
 
 
 class LeadScoreResponse(BaseModel):
@@ -142,6 +145,7 @@ class QualificationUpdate(BaseModel):
 
     conversation_id: UUID
     turn_id: UUID
+    call_id: UUID | None = None
     expected_profile_version: int = Field(ge=1, strict=True)
     facts: list[QualificationFact] = Field(min_length=1, max_length=20)
 

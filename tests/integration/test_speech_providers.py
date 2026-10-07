@@ -484,3 +484,78 @@ async def test_real_websocket_connector_against_local_sarvam_wire_server() -> No
         assert events[-1] == TranscriptionCompleted(final_segments=1, input_samples=960)
         await asyncio.wait_for(finished.wait(), 1)
     assert sum(item["event"] == "audio_input" for item in observed) == 3
+
+
+@pytest.mark.asyncio
+async def test_sarvam_long_turn_segments_can_finalize_before_audio_eof() -> None:
+    class SplitSocket(FakeSocket):
+        async def send(self, message: str) -> None:
+            await super().send(message)
+            event = json.loads(message)
+            if event["event"] == "audio_input":
+                count = sum(item["event"] == "audio_input" for item in self.sent)
+                if count == 1:
+                    self.queue.put_nowait(
+                        json.dumps(
+                            {
+                                "event": "transcript.final",
+                                "utterance_idx": 0,
+                                "text": "First sentence.",
+                            }
+                        )
+                    )
+                if count == 2:
+                    self.queue.put_nowait(
+                        json.dumps(
+                            {"event": "transcript.partial", "utterance_idx": 1, "text": "Second"}
+                        )
+                    )
+
+    socket = SplitSocket(
+        frames=[
+            {"event": "transcript.final", "utterance_idx": 1, "text": "Second sentence."},
+            {"event": "session.end", "request_id": "vendor-session", "total_utterances": 2},
+        ]
+    )
+
+    async def paced() -> AsyncGenerator[Any, None]:
+        async for chunk in fixture_audio():
+            yield chunk
+            await asyncio.sleep(0.01)
+
+    events = [
+        event
+        async for event in SpeechToTextRuntime(
+            SarvamSTTProvider(SecretStr("key"), connector=FakeConnector(socket))
+        ).transcribe(stt_request(), paced())
+    ]
+    transcripts = [event for event in events if isinstance(event, TranscriptEvent)]
+    assert [event.text for event in transcripts if event.is_final] == [
+        "First sentence.",
+        "Second sentence.",
+    ]
+    assert [event.segment_index for event in transcripts] == [0, 1, 1]
+    assert transcripts[0].segment_id != transcripts[1].segment_id
+    assert transcripts[1].segment_id == transcripts[2].segment_id
+    assert transcripts[0].end_sample == transcripts[1].start_sample == 320
+    assert events[-1] == TranscriptionCompleted(final_segments=2, input_samples=960)
+    assert socket.closed
+
+
+@pytest.mark.asyncio
+async def test_sarvam_does_not_accept_unresolved_continuation_partial() -> None:
+    socket = FakeSocket(
+        frames=[
+            {"event": "transcript.final", "utterance_idx": 0, "text": "First."},
+            {"event": "transcript.partial", "utterance_idx": 1, "text": "Unfinished"},
+            {"event": "session.end", "request_id": "vendor-session", "total_utterances": 1},
+        ]
+    )
+    with pytest.raises(SpeechError, match="invalid_output"):
+        _ = [
+            event
+            async for event in SpeechToTextRuntime(
+                SarvamSTTProvider(SecretStr("key"), connector=FakeConnector(socket))
+            ).transcribe(stt_request(), fixture_audio())
+        ]
+    assert socket.closed

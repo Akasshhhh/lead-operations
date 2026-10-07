@@ -83,10 +83,15 @@ UNSUPPORTED = re.compile(
     r"book\w*|schedul\w*|transfer\w*|handoff|hand[- ]off|follow[- ]up)\b",
     re.I,
 )
+INTERNAL_TOOL = re.compile(
+    r"\b(?:get_lead_profile|get_qualification|get_missing_fields|get_conversation_history|"
+    r"propose_qualification|request_workflow_action|HUMAN_HANDOFF|FOLLOW_UP|END_CONVERSATION)\b",
+    re.I,
+)
 
 
 def review_output(text: str) -> AgentOutputDecision:
-    if UNSUPPORTED.search(text):
+    if UNSUPPORTED.search(text) or INTERNAL_TOOL.search(text):
         return AgentOutputDecision(
             text=(
                 "I can help collect your details. A consultant must review eligibility. "

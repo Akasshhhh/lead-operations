@@ -4,7 +4,12 @@ import json
 from uuid import UUID
 
 from sqlalchemy import select
-from voice_platform_contracts.qualification import ProposedFacts, StagedTurnCreate, ValidatedFacts
+from voice_platform_contracts.qualification import (
+    ProposalRejection,
+    ProposedFacts,
+    StagedTurnCreate,
+    ValidatedFacts,
+)
 from voice_platform_db.models import DomainEvent, Message
 
 from .service import ConversationService, TurnConflictError
@@ -20,7 +25,12 @@ class StagedTurns(ConversationService):
 
     @staticmethod
     def proposal_hash(data: ProposedFacts) -> str:
-        payload = data.model_dump(mode="json")
+        # Default requests retain their historical receipt hash.
+        payload = data.model_dump(mode="json", exclude={"on_rejection", "extraction_rejection"})
+        if data.on_rejection != "reject":
+            payload["on_rejection"] = data.on_rejection
+        if data.extraction_rejection is not None:
+            payload["extraction_rejection"] = data.extraction_rejection.model_dump(mode="json")
         payload["proposals"] = sorted(payload["proposals"], key=lambda p: p["field_key"])
         return ConversationService._content_hash(json.dumps(payload, sort_keys=True))
 
@@ -93,7 +103,12 @@ class StagedTurns(ConversationService):
         return None
 
     async def bind(
-        self, cid: UUID, tid: UUID, data: ProposedFacts, validated: ValidatedFacts
+        self,
+        cid: UUID,
+        tid: UUID,
+        data: ProposedFacts,
+        validated: ValidatedFacts,
+        rejection: ProposalRejection | None = None,
     ) -> Message:
         existing = await self.bound(cid, tid, data)
         if existing is not None:
@@ -101,18 +116,27 @@ class StagedTurns(ConversationService):
         message = await self.message(cid, tid)
         message.message_metadata = {
             "stage": "BOUND",
+            "call_provenance": "call-v1",
             "qualification_facts": [fact.model_dump(mode="json") for fact in validated.facts],
             "provenance": [
                 item
                 | {
                     "turn_id": str(tid),
+                    "call_id": str(message.call_id),
                     "source": "USER_TRANSCRIPT",
                     "validation_policy": "evidence-v1",
                 }
                 for item in validated.provenance
             ],
             "proposal_hash": self.proposal_hash(data),
-        }
+        } | (
+            {
+                "proposal_rejection": rejection.model_dump(mode="json")
+                | {"provider": data.provider, "model": data.model}
+            }
+            if rejection
+            else {}
+        )
         message.qualification_error = None
         self._event(
             event_type="conversation.turn.facts_bound",

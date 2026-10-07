@@ -177,9 +177,7 @@ class VoiceProcessor(FrameProcessor):
                     await self.finish_media()
         except (DependencyError, SpeechError, LLMError) as exc:
             await self.push_frame(InterruptionFrame())
-            await self._error(
-                "dependency_unavailable" if isinstance(exc, DependencyError) else exc.code
-            )
+            await self._error(exc.code)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -221,14 +219,23 @@ class VoiceProcessor(FrameProcessor):
             await self._error("runtime_error")
         finally:
             await feed.aclose()
+            if self.feed is feed:
+                self.feed = None
 
     async def begin_utterance(self) -> None:
         if not self.ready:
             return
+        # A new VAD onset must not cancel the turn whose input is still being finalized.
+        if self.stt_task is not None and not self.stt_task.done():
+            return
+        if self.dialogue.pending is not None or getattr(self.dialogue, "workflow_pending", None):
+            if self.response_task is not None and not self.response_task.done():
+                return  # Accepted business work is progressing; this is not a dependency failure.
+            await self._error("turn_busy")
+            return
         await self.interrupt()
-        if self.dialogue.pending is not None or (
-            self.stt_task is not None and not self.stt_task.done()
-        ):
+        # Joining cancellation can finish a shielded write or leave an ambiguous acknowledgement.
+        if self.dialogue.pending is not None or getattr(self.dialogue, "workflow_pending", None):
             await self._error("turn_busy")
             return
         self.feed = AudioFeed()
@@ -265,8 +272,8 @@ class VoiceProcessor(FrameProcessor):
                     if getattr(self.dialogue, "close_media_requested", False) and self.finish_media:
                         self.ready = False
                         await self.finish_media()
-                except DependencyError:
-                    await self._error("dependency_unavailable")
+                except DependencyError as exc:
+                    await self._error(exc.code)
         elif isinstance(frame, VADUserStartedSpeakingFrame) and not self.manual:
             await self.begin_utterance()
         elif isinstance(frame, VADUserStoppedSpeakingFrame) and not self.manual:

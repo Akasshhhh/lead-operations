@@ -111,6 +111,9 @@ class QualificationAnswer(Base):
         String(32), nullable=False, default="AGENT", server_default="AGENT"
     )
     conversation_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    call_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    pending_value: Mapped[object | None] = mapped_column(JSONB)
+    pending_call_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -166,6 +169,9 @@ class LeadScoreHistory(Base):
     previous_score: Mapped[int | None] = mapped_column(Integer)
     new_score: Mapped[int] = mapped_column(Integer, nullable=False)
     classification: Mapped[str] = mapped_column(String(16), nullable=False)
+    answer_changes: Mapped[object] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="[]"
+    )
     reasons: Mapped[object] = mapped_column(
         JSONB, nullable=False, default=list, server_default="[]"
     )

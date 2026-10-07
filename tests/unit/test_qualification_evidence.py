@@ -119,3 +119,85 @@ def test_staged_contracts_forbid_score_fields_and_unsafe_text() -> None:
         ProposedFacts.model_validate(
             {"proposals": [], "provider": "mock", "model": "test", "score": 100}
         )
+
+
+@pytest.mark.parametrize(
+    "field,value,text,expected",
+    [
+        ("target_country", "USA", "I want to go to USA.", "united states"),
+        ("target_country", "Canada", "I confirm my target country is Canada.", "canada"),
+        ("visa_type", "H1B", "I need H1B visa.", "h-1b"),
+        (
+            "visa_type",
+            "skilled worker",
+            "I confirm my visa route is skilled worker.",
+            "skilled worker",
+        ),
+    ],
+)
+def test_intake_values_require_verbatim_evidence_and_normal_confirmation(
+    field: str, value: str, text: str, expected: str
+) -> None:
+    validated = validate_proposals(
+        ValidateProposals.model_validate(
+            {
+                "user_text": text,
+                "provider": "mock",
+                "model": "test",
+                "proposals": [{"field_key": field, "value": value, "evidence": text}],
+            }
+        )
+    )
+    assert validated.facts[0].value == expected
+    assert validated.facts[0].status == (
+        "CONFIRMED" if text.startswith("I confirm") else "PROVISIONAL"
+    )
+
+
+@pytest.mark.parametrize(
+    "field,value,text",
+    [
+        ("target_country", "canada", "I want to go to USA."),
+        ("visa_type", "h-1b", "I need an F1 visa."),
+        ("target_country", "canada", "Maybe I want to go to Canada."),
+        ("visa_type", "h-1b", "I do not want an H1B visa."),
+        ("visa_type", "x" * 81, "I need " + "x" * 81 + " visa."),
+    ],
+)
+def test_intake_does_not_accept_invented_uncertain_negative_or_oversized_values(
+    field: str, value: str, text: str
+) -> None:
+    with pytest.raises(QualificationValidationError):
+        validate_proposals(
+            ValidateProposals.model_validate(
+                {
+                    "user_text": text,
+                    "provider": "mock",
+                    "model": "test",
+                    "proposals": [{"field_key": field, "value": value, "evidence": text}],
+                }
+            )
+        )
+
+
+def test_llm_proposals_cannot_supply_call_identity() -> None:
+    from uuid import uuid4
+
+    with pytest.raises(ValidationError):
+        ProposedFacts.model_validate(
+            {
+                "provider": "mock",
+                "model": "test",
+                "call_id": str(uuid4()),
+                "proposals": [],
+            }
+        )
+    with pytest.raises(ValidationError):
+        FactProposal.model_validate(
+            {
+                "field_key": "target_country",
+                "value": "canada",
+                "evidence": "Go to Canada",
+                "call_id": str(uuid4()),
+            }
+        )

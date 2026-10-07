@@ -1,4 +1,4 @@
-"""One manually delimited Sarvam realtime utterance per request-owned socket."""
+"""One bounded application turn per request-owned Sarvam realtime socket."""
 
 import asyncio
 import base64
@@ -94,7 +94,9 @@ class SarvamSTTProvider:
         if not self.accepts(request):
             raise SpeechError("invalid_input", request_id=request.request_id, provider=self.name)
         samples = chunks = 0
-        final = partial = False
+        utterances = finals = 0
+        partial = False
+        start_sample = 0
         deadline = asyncio.get_running_loop().time() + request.timeout_seconds
         url = "wss://api.sarvam.ai/speech-to-text-realtime/ws?" + urlencode(
             {
@@ -196,38 +198,45 @@ class SarvamSTTProvider:
                             raise ValueError("missing session begin")
                         elif event in {"transcript.partial", "transcript.final"}:
                             if (
-                                final
-                                or type(data.get("utterance_idx")) is not int
-                                or data["utterance_idx"] != 0
+                                type(data.get("utterance_idx")) is not int
+                                or data["utterance_idx"] != utterances
+                                or utterances >= 200
                             ):
                                 raise ValueError("unexpected utterance")
                             text = data.get("text")
                             if not isinstance(text, str):
                                 raise ValueError("missing transcript text")
                             is_final = event == "transcript.final"
-                            if is_final:
-                                async with asyncio.timeout_at(deadline):
-                                    await sender
-                                final = True
                             if not text.strip():
-                                if is_final and partial:
-                                    raise ValueError("unresolved partial")
+                                if is_final:
+                                    if partial:
+                                        raise ValueError("unresolved partial")
+                                    utterances += 1
+                                    start_sample = samples
                                 continue
-                            partial = True
-                            # Coverage of this manually supplied utterance, not word alignment.
-                            yield TranscriptEvent(
-                                segment_id=f"sarvam_{request.utterance_id.hex}_0",
-                                segment_index=0,
+                            partial = not is_final
+                            # Vendor may split a long manually delimited turn. Keep immutable,
+                            # contiguous segments; offsets describe consumed audio, not alignment.
+                            segment = TranscriptEvent(
+                                segment_id=f"sarvam_{request.utterance_id.hex}_{utterances}",
+                                segment_index=finals,
                                 text=text,
                                 is_final=is_final,
-                                start_sample=0,
+                                start_sample=start_sample,
                                 end_sample=samples,
                             )
+                            if is_final:
+                                utterances += 1
+                                finals += 1
+                                start_sample = samples
+                            yield segment
                         elif event == "session.end":
                             async with asyncio.timeout_at(deadline):
                                 await sender
-                            if data.get("request_id") != session or (
-                                not final and (partial or data.get("total_utterances") != 0)
+                            if (
+                                data.get("request_id") != session
+                                or partial
+                                or (utterances == 0 and data.get("total_utterances") != 0)
                             ):
                                 raise ValueError("incomplete STT session")
                             break
@@ -239,7 +248,7 @@ class SarvamSTTProvider:
                     if not sender.done():
                         sender.cancel()
                     await asyncio.gather(sender, return_exceptions=True)
-            yield TranscriptionCompleted(final_segments=int(partial), input_samples=samples)
+            yield TranscriptionCompleted(final_segments=finals, input_samples=samples)
         except TimeoutError:
             raise SpeechError(
                 "timeout", request_id=request.request_id, provider=self.name
