@@ -2291,3 +2291,83 @@ Live-stack process-outage/Compose-hardening files were excluded, and no paid-pro
 microphone or deployment rebuild was performed. The isolated qualification test DB
 was removed after verification. Existing .env.example and concurrently added .gitignore
 changes were preserved. Handoff remains ignored/untracked; changes are uncommitted.
+
+
+### Voice flow resilience and bounded qualification replies (2026-10-08)
+
+Inspected current committed baseline 20344e6 and the running stack before changing
+code. Modules 1–18 and the approved call-scoped current-truth/intake changes remain
+complete. This is a focused live-call correction, not another module or redesign.
+The live audit found successful staged user-turn bind/application followed by HTTP
+422 agent-message write failures and repeated recovery attempts. The old logs do
+not identify which request field was invalid; do not claim the historical field is
+known. Existing provider telemetry also showed sequential extraction/reply/read-tool
+LLM calls (roughly 1.6–3.2 seconds per successful attempt) and a roughly 2.2-second
+Sarvam TTS attempt. These are individual attempt timings, not end-to-end microphone
+latency measurements. STT already streams audio; there is no extra cleanup LLM.
+
+Changes:
+- After durable user-turn application, optional draft failures (empty/truncated/long
+  output, provider/generation timeout, malformed tool proposals or bounded read-tool
+  loops) use Lead's selected question instead of rejecting the whole voice turn.
+  True dependency failures and uncertain business writes still require exact recovery.
+- Incomplete intake replies include the Lead-selected question and at most one short
+  contextual sentence, capped at 60 words. Confirmation/conflict wording stays exact.
+  Completed intake can use a brief reviewed reply without another question. All chosen
+  ordinary replies still pass the existing backend output safety check before storage.
+- A straightforward statement that produced an accepted current-turn fact awaiting
+  confirmation uses Lead's exact confirmation question without a second LLM generation.
+  An older outstanding confirmation alone never activates this shortcut. Questions and
+  explicit workflow language retain the model/tool path; handoff, callback and end-call
+  authority, acknowledgements and persistence remain unchanged.
+- Optional spoken generation is bounded to two rounds/eight seconds instead of three
+  rounds/thirty seconds, and the prompt discourages rereading supplied context. Provider
+  routing/retries remain unchanged. An in-flight shielded workflow write is never
+  discarded by this deadline; its exact saved payload remains recoverable.
+- Conversation request-validation diagnostics record only a whitelisted field name and
+  normalized request ID, never request bodies, transcript values or validation messages.
+  Existing HTTP 422 response shape remains unchanged. Runtime distinguishes this known
+  pre-write request-validation rejection from unclassified/domain rejections.
+- A definitively rejected agent HTTP request has no write/receipt. Runtime tries one
+  canonical fallback with the same deterministic message identity and refreshed version.
+  If that request is also definitively rejected, it clears that unaccepted output so the
+  next user turn can proceed. It never substitutes payloads after an ambiguous failure,
+  conflict or unclassified rejection; those retain exact idempotent recovery payloads.
+- Empty STT completion creates no synthetic user turn and returns the browser to listening
+  with a retry notice. Client wording separates application request failures from caller
+  clarification and preserves the existing saved-work recovery controls.
+
+Lead qualification/scoring, evidence/confirmation, new-call revisions, database schema,
+state machines, idempotency receipts, staged persistence and workflow ownership are
+unchanged. No paid provider calls, historical turn recovery or live container mutation
+were performed during implementation. PROJECT_HANDOFF remains ignored/untracked.
+Activation after verification: end any live call, rebuild/recreate conversation-service,
+api-gateway and dashboard together, then refresh the browser. No new migration is added
+by this correction; the previously approved current-truth migration remains required.
+Paid-provider microphone latency and the exact historical invalid request field remain
+live verification items. Validation diagnostics will identify any recurrence's field.
+
+
+Verification for the voice-flow correction:
+- Full Python regression gate: 683 passed, 1 deployment-only skip (150.79s), including
+  the eight opt-in Chrome dashboard/voice cases, PostgreSQL/Redis, real WebRTC with
+  synthetic audio, and migration compatibility checks. Ten existing third-party
+  deprecation warnings remain. Live process-outage and Compose hardening files were
+  excluded so the running stack was not disrupted.
+- Final UI/fixture adjustments additionally passed all six production dashboard
+  integration cases (47.33s) and all eight frontend Playwright cases (14.9s). The
+  simultaneous-call harness intermittently failed to deliver enough microphone PCM
+  before its fixed 300 ms Stop. It now uses the existing speech WAV fixture and waits
+  for actual PCM on both peers; transcript, score and isolation assertions remain.
+  The speech retry notice is cleared when the next transcript arrives.
+- Ruff lint/format (158 files), strict mypy (140 sources), TypeScript, Prettier,
+  production Next.js build, single Alembic head and Git whitespace checks pass.
+- New tests exercise normal and repeated definitive HTTP validation rejection,
+  content-free diagnostics, unchanged recovery after 409/unclassified 422/503,
+  lost acknowledgement, invalid/long/truncated/unavailable model replies, malformed
+  tools, invalid draft provenance, next-turn continuation, direct confirmation,
+  pending-confirmation workflow requests and deadlines during shielded workflow
+  commits. Qualification state and transcript durability remain asserted.
+- Changes are uncommitted. The isolated test database was removed after verification.
+  No live containers, historical operations or paid-provider sessions were changed.
+  Both main project documents were updated; PROJECT_HANDOFF stays ignored/untracked.

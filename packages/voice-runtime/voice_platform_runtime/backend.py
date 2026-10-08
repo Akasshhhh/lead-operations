@@ -31,12 +31,15 @@ from voice_platform_contracts.workflow import (
 
 
 class DependencyError(RuntimeError):
-    def __init__(self, status: int = 503) -> None:
+    def __init__(self, status: int = 503, *, invalid_request: bool = False) -> None:
         super().__init__("conversation operation unavailable")
         self.status = status
+        self.invalid_request = invalid_request
 
     @property
     def code(self) -> str:
+        if self.invalid_request:
+            return "invalid_operation_request"
         return {
             404: "operation_not_found",
             409: "operation_conflict",
@@ -70,8 +73,18 @@ class Backend:
                     json=payload.model_dump(mode="json") if payload is not None else None,
                 )
             if response.status_code != 200:
+                invalid_request = False
+                if response.status_code == 422:
+                    try:
+                        error = response.json()
+                        invalid_request = (
+                            isinstance(error, dict) and error.get("detail") == "invalid request"
+                        )
+                    except ValueError:
+                        pass
                 raise DependencyError(
-                    response.status_code if response.status_code in {404, 409, 422} else 503
+                    response.status_code if response.status_code in {404, 409, 422} else 503,
+                    invalid_request=invalid_request,
                 )
             return model.model_validate(response.json())
         except (httpx.RequestError, TimeoutError, ValueError, ValidationError):

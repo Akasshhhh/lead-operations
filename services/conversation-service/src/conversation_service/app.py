@@ -237,7 +237,20 @@ def create_app(
         app.add_exception_handler(error_type, database_failure)
 
     @app.exception_handler(RequestValidationError)
-    async def validation_error(_: Request, __: RequestValidationError) -> JSONResponse:
+    async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+        # Never log input or validation messages: they may contain speech or secrets.
+        for error in exc.errors()[:8]:
+            location = error.get("loc", ())
+            field = str(location[-1]) if location else "unknown"
+            if field not in AgentMessageCreate.model_fields:
+                field = "other"
+            telemetry.record(
+                "request.validation",
+                "rejected",
+                0,
+                request_id=request_id(request),
+                field_key=field,
+            )
         return JSONResponse(status_code=422, content={"detail": "invalid request"})
 
     @app.exception_handler(ConversationNotFoundError)

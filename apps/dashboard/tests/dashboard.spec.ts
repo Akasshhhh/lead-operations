@@ -430,6 +430,45 @@ for (const manual of [false, true]) {
           voiceTestChannel: { onmessage: (event: MessageEvent) => void };
         }
       ).voiceTestChannel;
+      for (const event of [
+        {
+          type: "error",
+          code: "invalid_operation_request",
+          retry_required: false,
+        },
+        { type: "speech_retry" },
+        { type: "ready" },
+      ])
+        channel.onmessage(
+          new MessageEvent("message", { data: JSON.stringify(event) }),
+        );
+    });
+    await expect(page.getByText(/I didn't catch any words/)).toBeVisible();
+    await expect(page.getByText(/Voice operation:/)).toHaveCount(0);
+    if (manual) await expect(start).toBeEnabled();
+    await page.evaluate(() => {
+      const channel = (
+        window as unknown as {
+          voiceTestChannel: { onmessage: (event: MessageEvent) => void };
+        }
+      ).voiceTestChannel;
+      channel.onmessage(
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            type: "transcript",
+            text: "Try again",
+            final: true,
+          }),
+        }),
+      );
+    });
+    await expect(page.getByText(/I didn't catch any words/)).toHaveCount(0);
+    await page.evaluate(() => {
+      const channel = (
+        window as unknown as {
+          voiceTestChannel: { onmessage: (event: MessageEvent) => void };
+        }
+      ).voiceTestChannel;
       channel.onmessage(
         new MessageEvent("message", {
           data: JSON.stringify({

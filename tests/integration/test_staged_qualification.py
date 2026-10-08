@@ -771,9 +771,8 @@ async def test_repeated_tool_ids_and_unbounded_loops_stop_after_durable_applicat
         system.conversation_id,
         system.call_id,
     )
-    with pytest.raises(DependencyError) as error:
-        await dialogue.reply("Information please.", uuid4())
-    assert error.value.status == 422
+    output, _ = await dialogue.reply("Information please.", uuid4())
+    assert output == "What is your highest education level?"
     assert dialogue.pending is None
     async with system.sessions() as db:
         message = await db.scalar(

@@ -138,7 +138,11 @@ async def evaluate_step(dialogue: QualifiedDialogue, step: Step) -> None:
     assert value == step.value and type(value) is type(step.value)
     assert context.plan.next_field == step.next_field
     assert context.plan.next_question is not None
-    assert output == "Thanks, that helps. " + context.plan.next_question
+    if step.status in {"PROVISIONAL", "CONTRADICTORY"} and step.next_field == step.field:
+        assert output == context.plan.next_question
+        assert len(fallback.requests) == 1  # no optional spoken-generation round trip
+    else:
+        assert output == "Thanks, that helps. " + context.plan.next_question
     assert output.count("?") <= 1
     assert dialogue.llm.health()[0].failover_count == 1
     assert all(r.conversation_id == dialogue.cid for r in fallback.requests)

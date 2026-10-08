@@ -504,6 +504,74 @@ class ActionProvider:
         yield CompletionEvent(finish_reason="tool_calls")
 
 
+@pytest.mark.parametrize(
+    "text,action",
+    [
+        ("I want to speak to a human.", "HUMAN_HANDOFF"),
+        ("Please call me later.", "FOLLOW_UP"),
+        ("Please end this call.", "END_CONVERSATION"),
+    ],
+)
+async def test_pending_confirmation_does_not_bypass_caller_workflow(
+    system: System,
+    text: str,
+    action: str,
+) -> None:
+    from test_conversational_dialogue import ConversationProvider, dialogue, fact
+
+    await transition_to_greeting(system)
+    statement = "I have a masters degree."
+    runtime = dialogue(
+        system, ConversationProvider("unused", fact(statement, "education_level", "masters"))
+    )
+    await runtime.reply(statement, uuid4())
+    runtime.llm = LLMRouter((ProviderSlot(ActionProvider(text, action)),))
+    await runtime.reply(text, uuid4())
+    assert runtime.close_media_requested and runtime.workflow_pending is None
+    context = await runtime.backend.qualification_context(runtime.cid, uuid4())
+    assert context.plan.qualification.answers[0].answer_status == "PROVISIONAL"
+
+
+async def test_optional_reply_deadline_retains_inflight_workflow_receipt(
+    system: System,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await transition_to_greeting(system)
+    text = "Please call me later."
+    runtime = QualifiedDialogue(
+        Backend(system.conversation, "test-token"),
+        LLMRouter((ProviderSlot(ActionProvider(text, "FOLLOW_UP")),)),
+        system.conversation_id,
+        system.call_id,
+    )
+    timeout = asyncio.timeout
+    entered, release = asyncio.Event(), asyncio.Event()
+    workflow = runtime.backend.workflow
+    attempts: list[Any] = []
+
+    async def delayed_workflow(cid: UUID, data: Any, rid: UUID) -> Any:
+        attempts.append(data)
+        entered.set()
+        await release.wait()
+        return await workflow(cid, data, rid)
+
+    monkeypatch.setattr(asyncio, "timeout", lambda delay: timeout(0.3 if delay == 8 else delay))
+    monkeypatch.setattr(runtime.backend, "workflow", delayed_workflow)
+    task = asyncio.create_task(runtime.reply(text, uuid4()))
+    await asyncio.wait_for(entered.wait(), 1)
+    await asyncio.sleep(0.35)
+    assert not task.done()  # deadline cannot abandon a shielded write
+    release.set()
+    with pytest.raises(DependencyError) as error:
+        await task
+    assert error.value.status == 503 and runtime.workflow_pending == attempts[0]
+    await runtime.recover()
+    assert attempts == [attempts[0], attempts[0]] and runtime.workflow_pending is None
+    assert runtime.close_media_requested
+    history = await runtime.backend.history(runtime.cid, uuid4())
+    assert len(history.items) == 2 and history.items[-1].speaker == "AGENT"
+
+
 @pytest.mark.parametrize("lost", [False, True])
 async def test_runtime_action_and_lost_reply_recovery_without_audio(
     system: System,

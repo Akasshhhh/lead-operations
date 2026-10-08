@@ -47,15 +47,42 @@ from voice_platform_llm import (
 )
 from voice_platform_runtime.backend import Backend
 from voice_platform_speech import (
+    AudioChunk,
     MockSTTProvider,
     MockSTTScript,
     SpeechSettings,
     SpeechSlot,
+    SpeechStream,
     STTRouter,
+    TranscriptionEvent,
+    TranscriptionRequest,
 )
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 other_system = system
+
+
+class AudioObservedSTT(MockSTTProvider):
+    """Observe actual browser PCM arrival instead of assuming a wall-clock delay."""
+
+    def __init__(self, script: MockSTTScript) -> None:
+        super().__init__(script)
+        self.samples: dict[UUID, int] = {}
+
+    async def transcribe(
+        self,
+        request: TranscriptionRequest,
+        audio: SpeechStream[AudioChunk],
+    ) -> AsyncGenerator[TranscriptionEvent, None]:
+        async def observed() -> AsyncGenerator[AudioChunk, None]:
+            async for chunk in audio:
+                self.samples[request.conversation_id] = (
+                    self.samples.get(request.conversation_id, 0) + len(chunk.data) // 2
+                )
+                yield chunk
+
+        async for event in super().transcribe(request, observed()):
+            yield event
 
 
 class DashboardProvider:
@@ -117,7 +144,7 @@ async def dashboard(
     monkeypatch.setenv("LLM_MODE", "mock")
     monkeypatch.setenv("SPEECH_MODE", "mock")
     monkeypatch.setenv("DEMO_FAULTS_ENABLED", "1")
-    stt = MockSTTProvider(MockSTTScript(text="I confirm my masters degree.", interim=None))
+    stt = AudioObservedSTT(MockSTTScript(text="I confirm my masters degree.", interim=None))
 
     def llm_router(self: LLMSettings, client: httpx.AsyncClient) -> LLMRouter:
         return LLMRouter((ProviderSlot(DashboardProvider()),))
@@ -508,6 +535,9 @@ async def test_two_dashboard_calls_keep_media_transcripts_and_scores_isolated(
 ) -> None:
     from playwright.async_api import async_playwright, expect
 
+    speech_file = os.getenv("VOICE_TEST_WAV")
+    if not speech_file or not Path(speech_file).exists():
+        pytest.fail("VOICE_TEST_WAV speech fixture is required for simultaneous calls")
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(
             executable_path=os.getenv(
@@ -518,6 +548,7 @@ async def test_two_dashboard_calls_keep_media_transcripts_and_scores_isolated(
                 "--use-fake-device-for-media-stream",
                 "--use-fake-ui-for-media-stream",
                 "--autoplay-policy=no-user-gesture-required",
+                f"--use-file-for-fake-audio-capture={speech_file}",
             ],
         )
         try:
@@ -543,7 +574,12 @@ async def test_two_dashboard_calls_keep_media_transcripts_and_scores_isolated(
                     for page in pages
                 )
             )
-            await asyncio.sleep(0.3)
+            stt = cast(AudioObservedSTT, dashboard[1])
+            async with asyncio.timeout(10):
+                while any(
+                    stt.samples.get(s.conversation_id, 0) < 3200 for s in (system, other_system)
+                ):
+                    await asyncio.sleep(0.02)
             await asyncio.gather(
                 *(
                     page.get_by_role("button", name="Stop speaking", exact=False).click()

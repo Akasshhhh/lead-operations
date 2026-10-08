@@ -211,6 +211,9 @@ class VoiceProcessor(FrameProcessor):
                 self.response_task = asyncio.create_task(
                     self._respond(lambda: self.dialogue.reply(" ".join(final), uid))
                 )
+            else:
+                await self.notify({"type": "speech_retry"})
+                await self.notify({"type": "ready"})
         except SpeechError as exc:
             await self._error(exc.code)
         except asyncio.CancelledError:

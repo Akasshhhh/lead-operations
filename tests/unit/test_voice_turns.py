@@ -37,6 +37,48 @@ class CallerDialogue:
 
 
 @pytest.mark.asyncio
+async def test_empty_transcription_returns_to_listening_without_synthetic_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    caller = CallerDialogue()
+    events: list[dict[str, object]] = []
+
+    async def notify(event: dict[str, object]) -> None:
+        events.append(event)
+
+    async def push(*args: Any, **kwargs: Any) -> None:
+        pass
+
+    processor = VoiceProcessor(
+        cast(Dialogue, caller),
+        STTRouter((SpeechSlot(MockSTTProvider(MockSTTScript(text=""))),)),
+        TTSRouter((SpeechSlot(MockTTSProvider()),)),
+        notify,
+    )
+    monkeypatch.setattr(processor, "push_frame", push)
+    processor.ready = True
+    await processor.begin_utterance()
+    assert processor.feed is not None
+    processor.feed.add(b"\0\0" * 320)
+    await processor.end_utterance()
+    assert processor.stt_task is not None
+    await asyncio.wait_for(processor.stt_task, 1)
+    assert caller.turns == [] and processor.response_task is None and processor.feed is None
+    assert events[-2:] == [{"type": "speech_retry"}, {"type": "ready"}]
+    processor.stt = STTRouter((SpeechSlot(MockSTTProvider(MockSTTScript(text="Try again"))),))
+    await processor.begin_utterance()
+    assert processor.feed is not None
+    processor.feed.add(b"\0\0" * 320)
+    await processor.end_utterance()
+    assert processor.stt_task is not None
+    await asyncio.wait_for(processor.stt_task, 1)
+    assert processor.response_task is not None
+    await asyncio.wait_for(processor.response_task, 1)
+    assert caller.turns == ["Try again"]
+    await processor.halt()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("manual", [False, True])
 async def test_auto_stops_on_vad_but_explicit_push_to_talk_waits_for_stop(
     manual: bool, monkeypatch: pytest.MonkeyPatch

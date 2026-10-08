@@ -1,6 +1,7 @@
 """Durable staged qualification before bounded read-tool dialogue and audio generation."""
 
 import asyncio
+import re
 from collections.abc import Awaitable, Callable
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
@@ -17,7 +18,7 @@ from voice_platform_contracts.workflow import (
     WorkflowActionCreate,
     WorkflowActionResponse,
 )
-from voice_platform_llm import ContextMessage, GenerationRequest, PromptContext
+from voice_platform_llm import ContextMessage, GenerationRequest, LLMError, PromptContext
 
 from .backend import DependencyError
 from .dialogue import Dialogue
@@ -32,15 +33,16 @@ INSTRUCTION = (
     "text-only chat or that you cannot hear them because you only see text. "
     "Do not invent an assessment of volume, clarity, background noise or microphone quality; "
     "transcription alone cannot establish those. "
-    "Listen before collecting details. Speak naturally in 1–3 concise sentences. "
+    "Listen before collecting details. Keep your reply under 60 words. "
+    "Use one short contextual sentence followed by the backend-selected question. "
     "Use the caller's latest answer and recent conversation so they feel heard. "
     "Acknowledge useful context briefly when appropriate, vary your wording, and do not "
     "mechanically prefix every question with an acknowledgement. Avoid sales language, "
     "exaggerated praise, fake human experience and manufactured empathy. "
     "For uncertainty or worry, acknowledge it and briefly explain what is needed instead "
-    "of repeating the same question verbatim. Answer a caller's relevant question briefly "
-    "when you can do so safely. It is fine to answer without asking another question; "
-    "do not force every reply back into an interview. If asked about next steps, explain "
+    "of repeating it without context. Answer a caller's relevant question briefly "
+    "when you can do so safely, then return to the backend-selected intake question "
+    "while details remain incomplete. If asked about next steps, explain "
     "in everyday language that you will collect the remaining details for a consultant "
     "to review. Do not promise an outcome or claim an action has happened. "
     "Ask at most ONE primary question per reply; do not read a questionnaire or list of fields. "
@@ -48,6 +50,8 @@ INSTRUCTION = (
     "Only the backend decides qualification, confirmation, score and next action. "
     "Caller-confirmed current values come from qualification answers; profile metadata "
     "does not establish caller confirmation. A pending replacement is not authoritative. "
+    "Scoped profile, qualification and recent history are already provided; do not reread them "
+    "unless essential. Include plan.next_question exactly whenever it exists. "
     "The authoritative plan includes known answers and their statuses. Do not ask again "
     "for confirmed valid facts or ignore facts supplied out of order. Guide your next "
     "qualification question using plan.next_field, phrased as a natural follow-up to the "
@@ -262,99 +266,151 @@ class QualifiedDialogue(Dialogue):
             context = await self.backend.qualification_context(self.cid, self.request_id)
             current = await self.backend.conversation(self.cid, self.request_id)
             messages.append(plan_message(context, current.next_action))
-            seen: set[str] = set()
-            # Whole tool loop is bounded in rounds and time; writes already completed durably.
-            async with asyncio.timeout(30):
-                for _ in range(3):
-                    response = await self.llm.generate(
-                        GenerationRequest(
-                            request_id=uuid4(),
-                            conversation_id=self.cid,
-                            turn_id=utterance_id,
-                            context=PromptContext(
-                                system_instruction=INSTRUCTION, messages=tuple(messages)
-                            ),
-                            tools=(*READ_TOOLS, ACTION),
-                            max_output_tokens=256,
-                            timeout_seconds=20,
-                        )
-                    )
-                    if not response.tool_calls:
-                        break
-                    if len(response.tool_calls) > 4 or any(
-                        call.id in seen for call in response.tool_calls
-                    ):
-                        raise DependencyError(422)
-                    seen.update(call.id for call in response.tool_calls)
-                    actions = [call for call in response.tool_calls if call.name == ACTION.name]
-                    if actions:
-                        if len(response.tool_calls) != 1:
-                            raise DependencyError(422)
-                        try:
-                            proposal = ActionProposal.model_validate(actions[0].arguments)
-                        except ValidationError:
-                            raise DependencyError(422) from None
-                        current = await self.backend.conversation(self.cid, self.request_id)
-                        self.workflow_pending = WorkflowActionCreate(
-                            **proposal.model_dump(),
-                            action_id=uuid5(
-                                NAMESPACE_URL, f"voice-workflow:{self.call_id}:{utterance_id}"
-                            ),
-                            turn_id=utterance_id,
-                            call_id=self.call_id,
-                            expected_version=current.version,
-                            provider=response.provider,
-                            model=response.model,
-                        )
-                        result = await self._workflow()
-                        if result.acknowledgement.redacted:
-                            raise DependencyError(409)
-                        return result.acknowledgement.text, result.acknowledgement.id
-                    messages.append(
-                        ContextMessage(
-                            role="assistant", content=response.text, tool_calls=response.tool_calls
-                        )
-                    )
-                    for call in response.tool_calls:
-                        messages.append(
-                            await execute_read(call, self.backend, self.cid, self.request_id)
-                        )
-                else:
-                    raise DependencyError(422)
-            if (
-                response.finish_reason != "stop"
-                or not response.text.strip()
-                or len(response.text) > 2000
-            ):
-                raise DependencyError(422)
-            # Lead still owns the plan. The model may phrase speech, not confirm facts
-            # or remove the backend's explicit confirmation/conflict protocol.
-            context = await self.backend.qualification_context(self.cid, self.request_id)
             question = context.plan.next_question
             protocol_required = context.plan.next_field in (
                 context.plan.provisional_fields + context.plan.contradictory_fields
             )
-            suitable = response.text.count("?") <= 1 and (
-                not protocol_required or (question is not None and question in response.text)
-            )
-            policy_changed = False
-            if suitable:
-                checked = await self.backend.output_policy(
-                    self.cid,
-                    AgentOutputCheck(
-                        turn_id=utterance_id,
-                        call_id=self.call_id,
-                        text=response.text,
-                    ),
-                    self.request_id,
+            # An uncomplicated intake statement needs Lead's exact confirmation, not
+            # a second model interpretation. Caller questions still get a spoken draft.
+            facts = self.staged.message_metadata.get("qualification_facts", [])
+            accepted_fields = {
+                fact.get("field_key")
+                for fact in (facts if isinstance(facts, list) else [])
+                if isinstance(fact, dict)
+            }
+            quick_confirmation = (
+                protocol_required
+                and context.plan.next_field in accepted_fields
+                and not re.search(
+                    r"\?|\b(?:what|why|how|when|where|can|could|would|please|human|"
+                    r"consultant|representative|callback|later|stop|end|bye|goodbye)\b",
+                    text,
+                    re.I,
                 )
-                output = checked.text if checked.allowed else (question or checked.text)
-                policy_changed = not checked.allowed
-            elif question is not None:
-                output = question
+            )
+            draft = ""
+            provider, model = "voice-runtime", "qualification-policy-v1"
+            if not quick_confirmation:
+                seen: set[str] = set()
+                try:
+                    # Generation is optional after the user turn is durably APPLIED.
+                    async with asyncio.timeout(8):
+                        for _ in range(2):
+                            response = await self.llm.generate(
+                                GenerationRequest(
+                                    request_id=uuid4(),
+                                    conversation_id=self.cid,
+                                    turn_id=utterance_id,
+                                    context=PromptContext(
+                                        system_instruction=INSTRUCTION, messages=tuple(messages)
+                                    ),
+                                    tools=(*READ_TOOLS, ACTION),
+                                    max_output_tokens=256,
+                                    timeout_seconds=8,
+                                )
+                            )
+                            if not response.tool_calls:
+                                if response.finish_reason == "stop" and len(response.text) <= 2000:
+                                    draft = response.text.strip()
+                                    provider, model = response.provider, response.model
+                                break
+                            if len(response.tool_calls) > 4 or any(
+                                call.id in seen for call in response.tool_calls
+                            ):
+                                break
+                            seen.update(call.id for call in response.tool_calls)
+                            actions = [
+                                call for call in response.tool_calls if call.name == ACTION.name
+                            ]
+                            if actions:
+                                if len(response.tool_calls) != 1:
+                                    break
+                                try:
+                                    proposal = ActionProposal.model_validate(actions[0].arguments)
+                                except ValidationError:
+                                    break
+                                current = await self.backend.conversation(self.cid, self.request_id)
+                                self.workflow_pending = WorkflowActionCreate(
+                                    **proposal.model_dump(),
+                                    action_id=uuid5(
+                                        NAMESPACE_URL,
+                                        f"voice-workflow:{self.call_id}:{utterance_id}",
+                                    ),
+                                    turn_id=utterance_id,
+                                    call_id=self.call_id,
+                                    expected_version=current.version,
+                                    provider=response.provider,
+                                    model=response.model,
+                                )
+                                result = await self._workflow()
+                                if result.acknowledgement.redacted:
+                                    raise DependencyError(409)
+                                return result.acknowledgement.text, result.acknowledgement.id
+                            messages.append(
+                                ContextMessage(
+                                    role="assistant",
+                                    content=response.text,
+                                    tool_calls=response.tool_calls,
+                                )
+                            )
+                            for call in response.tool_calls:
+                                messages.append(
+                                    await execute_read(
+                                        call, self.backend, self.cid, self.request_id
+                                    )
+                                )
+                except (LLMError, TimeoutError, ValidationError):
+                    if self.workflow_pending is not None:
+                        raise DependencyError() from None
+                    pass  # No generated draft is authoritative; use the validated plan.
+                except DependencyError as exc:
+                    if exc.status != 422:
+                        raise  # Ambiguous writes/outages must retain exact recovery payloads.
+                    if self.workflow_pending is not None:
+                        raise
+            # Lead selects the question. Preserve a short, reviewed acknowledgement,
+            # but replace a missing/different/long question with the authoritative one.
+            if question is not None:
+                if (
+                    quick_confirmation
+                    or not draft
+                    or len(draft.split()) > 60
+                    or draft.count("?") > 1
+                ):
+                    output = question
+                elif question in draft:
+                    output = draft
+                elif protocol_required:
+                    output = question
+                else:
+                    prefix = re.split(r"(?<=[.!])\s+", draft, maxsplit=1)[0]
+                    if "?" in prefix:
+                        prefix = ""
+                    output = (prefix + " " if prefix else "") + question
+                    if len(output.split()) > 60:
+                        output = question
             else:
-                raise DependencyError(422)
-            fallback = question is not None and output == question
+                output = (
+                    draft
+                    if draft and len(draft.split()) <= 60 and draft.count("?") <= 1
+                    else (
+                        "Your details are recorded. "
+                        "A consultant can review the next steps with you."
+                    )
+                )
+            checked = await self.backend.output_policy(
+                self.cid,
+                AgentOutputCheck(turn_id=utterance_id, call_id=self.call_id, text=output),
+                self.request_id,
+            )
+            if not checked.allowed:
+                output = question or checked.text
+            fallback = (
+                output != draft
+                or not checked.allowed
+                or re.fullmatch(r"[a-zA-Z0-9_-]+", provider) is None
+                or not model.strip()
+            )
             current = await self.backend.conversation(self.cid, self.request_id)
             mid = uuid5(NAMESPACE_URL, f"voice-agent:{self.call_id}:{utterance_id}")
             self.pending = AgentMessageCreate(
@@ -363,10 +419,32 @@ class QualifiedDialogue(Dialogue):
                 parent_turn_id=utterance_id,
                 expected_version=current.version,
                 text=output,
-                provider="voice-runtime" if fallback or policy_changed else response.provider,
-                model="qualification-policy-v1"
-                if fallback
-                else ("response-policy-v1" if policy_changed else response.model),
+                provider="voice-runtime" if fallback else provider,
+                model="qualification-policy-v1" if fallback else model,
             )
-            await self._commit(self._persist())
+            try:
+                await self._commit(self._persist())
+            except DependencyError as exc:
+                if exc.status != 422 or not exc.invalid_request:
+                    raise
+                # An HTTP request-validation rejection has no receipt/write. Do not
+                # trap recovery into retrying a definitively rejected generated reply.
+                self.pending = None
+                current = await self.backend.conversation(self.cid, self.request_id)
+                output = question or "Your words were saved. Please continue."
+                self.pending = AgentMessageCreate(
+                    message_id=mid,
+                    call_id=self.call_id,
+                    parent_turn_id=utterance_id,
+                    expected_version=current.version,
+                    text=output,
+                    provider="voice-runtime",
+                    model="qualification-policy-v1",
+                )
+                try:
+                    await self._commit(self._persist())
+                except DependencyError as retry_error:
+                    if retry_error.status == 422 and retry_error.invalid_request:
+                        self.pending = None
+                    raise
             return output, mid

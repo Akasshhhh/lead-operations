@@ -455,8 +455,10 @@ export default function Dashboard() {
         if (event.state !== "connected") setAgentReady(false);
         setSpeaking(false);
       }
-      if (event.type === "transcript" && typeof event.text === "string")
+      if (event.type === "transcript" && typeof event.text === "string") {
         setPartial(event.text.slice(0, 20000));
+        setNotice(null);
+      }
       if (event.type === "connected") {
         setMedia("connected");
         setAgentReady(true);
@@ -476,11 +478,17 @@ export default function Dashboard() {
                 ? "Recover the saved operation after the dependency returns."
                 : needsRecovery
                   ? "Saved work needs recovery. Use Recover operation; if it is rejected again, check the operation diagnostics."
-                  : event.code === "operation_rejected"
-                    ? "The request was rejected. Please clarify and try again."
-                    : "Please try speaking again; this operation has no saved work to recover."),
+                  : event.code === "invalid_operation_request"
+                    ? "The app could not complete this operation. Your saved conversation is preserved. Please try again."
+                    : event.code === "operation_rejected"
+                      ? "The request was rejected. Please clarify and try again."
+                      : "Please try speaking again; this operation has no saved work to recover."),
           ),
         );
+      }
+      if (event.type === "speech_retry") {
+        setSpeaking(false);
+        setNotice("I didn't catch any words. Please try speaking again.");
       }
       if (event.type === "qualification_rejected")
         setNotice(

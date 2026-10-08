@@ -284,6 +284,28 @@ async def test_backend_status_errors_do_not_expose_vendor_or_database_content(st
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "detail,definitive", [("invalid request", True), ("operation rejected", False)]
+)
+async def test_backend_distinguishes_request_validation_from_domain_rejections(
+    detail: str,
+    definitive: bool,
+) -> None:
+    from voice_platform_contracts.conversation import ConversationResponse
+
+    async with httpx.AsyncClient(
+        base_url="http://conversation",
+        transport=httpx.MockTransport(lambda _: httpx.Response(422, json={"detail": detail})),
+    ) as client:
+        with pytest.raises(DependencyError) as error:
+            await Backend(client, "test-token").request(
+                "POST", "/test", ConversationResponse, uuid4()
+            )
+    assert error.value.invalid_request is definitive
+    assert error.value.code == ("invalid_operation_request" if definitive else "operation_rejected")
+
+
+@pytest.mark.asyncio
 async def test_backend_timeout_closes_request_and_preserves_client_ownership() -> None:
     from voice_platform_contracts.conversation import ConversationResponse
 
